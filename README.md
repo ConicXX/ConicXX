@@ -28,12 +28,34 @@ ctest --test-dir build --output-on-failure
 ```
 
 Useful options: `CONICXX_BUILD_SHARED`, `CONICXX_BUILD_TESTS`, `CONICXX_BUILD_EXAMPLES`,
-`CONICXX_WARNINGS_AS_ERRORS`, `CONICXX_INSTALL`. See `examples/friction_contact_demo.cpp` for a
-minimal usage example (a QP-regularized contact force projected onto a Coulomb friction cone,
-solved once per "timestep" via `Solver::updateData`).
+`CONICXX_BUILD_BENCHMARKS`, `CONICXX_WARNINGS_AS_ERRORS`, `CONICXX_INSTALL`. See
+`examples/friction_contact_demo.cpp` for a minimal usage example (a QP-regularized contact force
+projected onto a Coulomb friction cone, solved once per "timestep" via `Solver::updateData`).
 
 Consume from another CMake project via `find_package(conicxx CONFIG REQUIRED)`,
 `add_subdirectory`, or `FetchContent` -- all three expose the same `conicxx::conicxx` target.
+
+## Benchmarks
+
+`benchmarks/` contains a small, deterministic performance suite (`conicxx_benchmarks`, also
+registered as a `ctest` under the `benchmark` label) covering problems drawn from the literature --
+the ECOS long-only portfolio-optimization SOCP (Domahidi/Chu/Boyd, eq. 17) and the QOCO group-lasso
+benchmark (Chari et al., sec. C.3) -- plus random QP/LP/SOCP instances and a domain-specific
+multi-contact Coulomb-friction QP+SOC problem. Each instance is built from a fixed seed and from an
+explicit strictly-feasible primal-dual pair, so it is guaranteed solvable and its reported iteration
+count is exactly reproducible.
+
+```sh
+./build/benchmarks/conicxx_benchmarks     # prints a QOCO/Clarabel-style table:
+                                           #   Family | Size | Trial | Status | Iters | Time | residuals
+ctest --test-dir build -L benchmark       # same, as a pass/fail regression gate (nonzero exit
+                                           # if any instance stops converging)
+ctest --test-dir build -LE benchmark      # run everything except the benchmark suite
+```
+
+To check whether a change affected solver behavior, run the suite before and after and compare the
+printed iteration counts/residuals (e.g. redirect to a file and `diff`) -- a shift there reflects a
+real algorithmic difference, not sampling noise.
 
 ## Literature
 

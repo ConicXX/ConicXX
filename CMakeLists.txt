@@ -18,6 +18,7 @@ endif()
 option(CONICXX_BUILD_SHARED "Build conicxx as a shared library instead of static" OFF)
 option(CONICXX_BUILD_TESTS "Build gtest-based unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(CONICXX_BUILD_EXAMPLES "Build example programs" ${PROJECT_IS_TOP_LEVEL})
+option(CONICXX_BUILD_BENCHMARKS "Build the benchmark suite" ${PROJECT_IS_TOP_LEVEL})
 option(CONICXX_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(CONICXX_INSTALL "Generate install/export rules" ${PROJECT_IS_TOP_LEVEL})
 
@@ -95,6 +96,11 @@ endif()
 # --- Examples ---
 if(CONICXX_BUILD_EXAMPLES)
   add_subdirectory(examples)
+endif()
+
+# --- Benchmarks ---
+if(CONICXX_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
 endif()
 
 # --- Install / export rules ---
