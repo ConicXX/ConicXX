@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find / -maxdepth 4 -iname \"eigen3\")",
+      "Bash(pkg-config --modversion eigen3)",
+      "Bash(grep -m1 \"define EIGEN_WORLD_VERSION\\\\|define EIGEN_MAJOR_VERSION\\\\|define EIGEN_MINOR_VERSION\" /usr/include/eigen3/Eigen/src/Core/util/Macros.h; echo ---; cat /home/jonas/gitprojects/conicxx/README.md)",
+      "Read(//usr/include/eigen3/Eigen/src/Core/util/**)",
+      "WebSearch",
+      "Read(//tmp/**)",
+      "Bash(curl -s -o misc.py \"https://raw.githubusercontent.com/cvxopt/cvxopt/master/src/python/misc.py\")",
+      "Bash(curl -s -o coneprog.py \"https://raw.githubusercontent.com/cvxopt/cvxopt/master/src/python/coneprog.py\")",
+      "Bash(cd /tmp && grep -n \"max_step\\\\|def maxstep\\\\|step2\\\\|linesearch\" coneprog.py | head -30)"
+    ]
+  }
+}
