@@ -14,6 +14,21 @@ bool Solver::setup(const SparseMat& P, const Vec& q, const SparseMat& A, const V
   return impl_->setup(P, q, A, b, cone_spec, settings);
 }
 
+bool Solver::setup(const Mat& P, const Vec& q, const SparseMat& A, const Vec& b,
+                   const ConeSpec& cone_spec, const Settings& settings) {
+  return setup(toSparseUpperTriangular(P, "P"), q, A, b, cone_spec, settings);
+}
+
+bool Solver::setup(const SparseMat& P, const Vec& q, const Mat& A, const Vec& b,
+                   const ConeSpec& cone_spec, const Settings& settings) {
+  return setup(P, q, toSparse(A, "A"), b, cone_spec, settings);
+}
+
+bool Solver::setup(const Mat& P, const Vec& q, const Mat& A, const Vec& b,
+                   const ConeSpec& cone_spec, const Settings& settings) {
+  return setup(toSparseUpperTriangular(P, "P"), q, toSparse(A, "A"), b, cone_spec, settings);
+}
+
 bool Solver::updateData(const SparseMat* P, const Vec* q, const SparseMat* A, const Vec* b) {
   return impl_->updateData(P, q, A, b);
 }

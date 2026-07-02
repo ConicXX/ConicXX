@@ -58,6 +58,7 @@ set(CONICXX_SOURCES
   src/conicxx/kkt/sparsity_map.cpp
   src/conicxx/kkt/kkt_system.cpp
   src/conicxx/kkt/equilibration.cpp
+  src/conicxx/convert.cpp
   src/conicxx/solution.cpp
   src/conicxx/solver.cpp
   src/conicxx/solver_impl.cpp

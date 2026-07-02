@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "conicxx/cone_spec.h"
+#include "conicxx/convert.h"
 #include "conicxx/settings.h"
 #include "conicxx/solution.h"
 #include "conicxx/types.h"
@@ -44,6 +45,29 @@ class Solver {
   /// spec, etc.) -- never throws.
   bool setup(const SparseMat& P, const Vec& q, const SparseMat& A, const Vec& b,
              const ConeSpec& cone_spec, const Settings& settings = Settings{});
+
+  /// Convenience overloads accepting P and/or A as dense matrices (handy for
+  /// small problems or quick prototyping, e.g. writing them out with `<<`).
+  /// Each dense argument is converted via conicxx::toSparse()/
+  /// toSparseUpperTriangular() -- which emits a one-time warning to stderr,
+  /// since a dense matrix carries no sparsity for the solver to exploit --
+  /// then delegates to the canonical sparse setup() above. For large or
+  /// genuinely sparse problems, construct SparseMat directly instead.
+  ///
+  /// There is deliberately no dense overload of updateData(): that is the
+  /// per-timestep hot path this library is designed around, and accepting
+  /// dense input there would defeat the sparsity-pattern-reuse it exists
+  /// for (a dense conversion of changing numeric data can't be relied on to
+  /// keep a stable derived sparsity pattern the way a real sparse matrix
+  /// does). Convert once with toSparse()/toSparseUpperTriangular() and reuse
+  /// the resulting SparseMat across updateData() calls, mutating only its
+  /// values.
+  bool setup(const Mat& P, const Vec& q, const SparseMat& A, const Vec& b,
+             const ConeSpec& cone_spec, const Settings& settings = Settings{});
+  bool setup(const SparseMat& P, const Vec& q, const Mat& A, const Vec& b,
+             const ConeSpec& cone_spec, const Settings& settings = Settings{});
+  bool setup(const Mat& P, const Vec& q, const Mat& A, const Vec& b, const ConeSpec& cone_spec,
+             const Settings& settings = Settings{});
 
   /// Cheap numeric-only update: overwrites P/q/A/b values in place, reusing
   /// the sparsity pattern from the last setup(). Pass nullptr for any

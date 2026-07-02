@@ -23,6 +23,7 @@ add_executable(conicxx_tests
   cones/test_nonnegative_cone.cpp
   cones/test_second_order_cone.cpp
   cones/test_cone_set.cpp
+  convert/test_convert.cpp
   kkt/test_sparsity_map.cpp
   kkt/test_kkt_system.cpp
   kkt/test_equilibration.cpp
@@ -30,6 +31,7 @@ add_executable(conicxx_tests
   solver/test_solve_lp.cpp
   solver/test_solve_socp.cpp
   solver/test_solve_friction_qp_soc.cpp
+  solver/test_solve_dense_input.cpp
   solver/test_infeasible.cpp
   solver/test_update_reuse.cpp
 )
