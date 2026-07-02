@@ -62,4 +62,16 @@ BenchProblem makeGroupLasso(Index num_groups, Index group_dim, Index num_measure
 /// nonsmooth multibody contact solve.
 BenchProblem makeFrictionChain(Index num_contacts, Scalar mu, std::mt19937& rng);
 
+/// Arbitrary-size scaling benchmark, sized after a real per-timestep
+/// multibody friction-contact problem reported against this solver
+/// (zero=4944, soc_blocks=66, an equality-to-friction-cone ratio of
+/// ~75:1). `num_contacts` is the single size knob: num_contacts 3D Coulomb
+/// friction cones (as in makeFrictionChain) are embedded in a banded chain
+/// of `75*num_contacts` equality constraints -- standing in for a long
+/// kinematic/dynamics constraint chain over many bodies -- instead of the
+/// single coupling row makeFrictionChain uses. This is what stresses KKT
+/// factorization at the scale where symbolic-analysis cost matters, and can
+/// be driven arbitrarily large by increasing num_contacts.
+BenchProblem makeFrictionChainXL(Index num_contacts, Scalar mu, std::mt19937& rng);
+
 }  // namespace conicxx::bench

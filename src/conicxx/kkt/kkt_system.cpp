@@ -65,16 +65,33 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
     HsBlockSlots hbs;
     hbs.z_offset = off;
     hbs.dim = d;
-    for (Index a = 0; a < d; ++a) {
-      for (Index b = 0; b <= a; ++b) {
-        const Index slot = sparsity_.addEntry(n_ + off + a, n_ + off + b);
-        hbs.slots.emplace_back(slot, a, b);
+    if (blk.type() == ConeType::SecondOrder) {
+      // The NT scaling block Hs = W^T W is genuinely dense for SOC blocks.
+      for (Index a = 0; a < d; ++a) {
+        for (Index b = 0; b <= a; ++b) {
+          const Index slot = sparsity_.addEntry(n_ + off + a, n_ + off + b);
+          hbs.slots.emplace_back(slot, a, b);
+        }
+      }
+    } else {
+      // Zero/Nonnegative cones: Hs is (at most) diagonal, so only the
+      // diagonal needs a slot in K (it also carries static/dynamic
+      // regularization). Registering the full triangle here would
+      // explicitly store an always-zero-valued dense block in K's
+      // sparsity pattern -- for a large equality (Zero-cone) or
+      // nonnegative block this causes catastrophic fill-in during
+      // symbolic/numeric factorization for a block that mathematically
+      // contributes nothing off-diagonal.
+      for (Index a = 0; a < d; ++a) {
+        const Index slot = sparsity_.addEntry(n_ + off + a, n_ + off + a);
+        hbs.slots.emplace_back(slot, a, a);
       }
     }
     hs_blocks_.push_back(std::move(hbs));
   }
 
   K_ = sparsity_.finalize(n_ + m_, n_ + m_);
+  ldlt_.analyzePattern(K_);
 
   p_outer_ref_.assign(P_upper.outerIndexPtr(), P_upper.outerIndexPtr() + P_upper.outerSize() + 1);
   p_inner_ref_.assign(P_upper.innerIndexPtr(), P_upper.innerIndexPtr() + P_upper.nonZeros());
@@ -140,10 +157,19 @@ bool KktSystem::factorizeWithRetry() {
   Scalar extra_p = 0.0, extra_a = 0.0;
   constexpr int kMaxRetries = 8;
   for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-    SparseMat K_try = K_;
-    if (extra_p != 0.0 || extra_a != 0.0) writeRegularizedDiagonal(K_try, extra_p, extra_a);
-
-    ldlt_.compute(K_try);
+    // Pattern is fixed after setup()'s one-time analyzePattern() call, so
+    // only factorize() (numeric refactorization) is needed here -- never
+    // compute(), which would redo the fill-reducing symbolic analysis from
+    // scratch on every IPM iteration. The K_ copy is only needed when a
+    // dynamic-regularization bump must be applied on top of it; the common
+    // (no-retry) case factorizes K_ directly.
+    if (extra_p != 0.0 || extra_a != 0.0) {
+      SparseMat K_try = K_;
+      writeRegularizedDiagonal(K_try, extra_p, extra_a);
+      ldlt_.factorize(K_try);
+    } else {
+      ldlt_.factorize(K_);
+    }
     if (ldlt_.info() == Eigen::Success) {
       const Vec D = ldlt_.vectorD();
       const Scalar minAbsD = D.size() > 0 ? D.array().abs().minCoeff() : Scalar(1.0);

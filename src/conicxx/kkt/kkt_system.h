@@ -18,6 +18,13 @@ namespace conicxx::detail {
 /// Only the strict lower triangle (plus diagonal) is ever built, matching
 /// Eigen::SimplicialLDLT<..., Eigen::Lower>'s expectations -- this halves
 /// the number of physical nonzeros relative to building both triangles.
+/// Within the Hs block, only SecondOrder cone blocks get a full dense
+/// lower-triangle of slots (their NT scaling is genuinely dense); Zero and
+/// Nonnegative blocks -- whose Hs is zero resp. diagonal -- get diagonal
+/// slots only, since registering the full triangle there would explicitly
+/// store an always-zero off-diagonal block in K's sparsity pattern, which
+/// is catastrophic for fill-in/factorization cost when such a block is
+/// large (e.g. a big equality/Zero-cone block).
 ///
 /// `setup()` performs the one-time triplet-based assembly and a single
 /// `analyzePattern()` call. Two update paths reuse that pattern without any

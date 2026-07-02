@@ -353,4 +353,55 @@ BenchProblem makeFrictionChain(Index num_contacts, Scalar mu, std::mt19937& rng)
   return prob;
 }
 
+BenchProblem makeFrictionChainXL(Index num_contacts, Scalar mu, std::mt19937& rng) {
+  BenchProblem prob;
+  prob.family = "FrictionChainXL";
+  prob.size_label = "contacts=" + std::to_string(num_contacts);
+
+  // Ratio observed on a real per-timestep multibody friction-contact
+  // problem: zero_dim=4944, soc_blocks=66 -> ~75 equality rows per contact.
+  constexpr Index kEqualityPerContact = 75;
+  const Index n = kEqualityPerContact * num_contacts;
+
+  prob.P = SparseMat(n, n);
+  std::vector<Triplet> p_triplets;
+  for (Index i = 0; i < n; ++i) p_triplets.emplace_back(i, i, 1.0);
+  prob.P.setFromTriplets(p_triplets.begin(), p_triplets.end());
+
+  std::vector<Triplet> a_triplets;
+  Index row = 0;
+
+  // Banded (tridiagonal-like) equality block over ALL n variables --
+  // stands in for a long kinematic/dynamics constraint chain over many
+  // bodies. Coefficients are structural, not physically meaningful: the
+  // instance's feasibility is guaranteed below via an explicit
+  // strictly-feasible primal-dual pair, independent of these values.
+  std::uniform_real_distribution<Scalar> band_dist(0.5, 1.5);
+  for (Index i = 0; i < n; ++i) {
+    a_triplets.emplace_back(row, i, band_dist(rng));
+    a_triplets.emplace_back(row, (i + 1) % n, 0.5 * band_dist(rng));
+    a_triplets.emplace_back(row, (i + 2) % n, 0.25 * band_dist(rng));
+    ++row;
+  }
+  prob.cone_spec.zero_dim = n;
+
+  // num_contacts independent 3D Coulomb friction cones on the first
+  // 3*num_contacts variables, identical in form to makeFrictionChain.
+  for (Index c = 0; c < num_contacts; ++c) {
+    a_triplets.emplace_back(row, 3 * c, -mu);
+    ++row;
+    a_triplets.emplace_back(row, 3 * c + 1, -1.0);
+    ++row;
+    a_triplets.emplace_back(row, 3 * c + 2, -1.0);
+    ++row;
+    prob.cone_spec.soc_dims.push_back(3);
+  }
+
+  prob.A = SparseMat(row, n);
+  prob.A.setFromTriplets(a_triplets.begin(), a_triplets.end());
+
+  makeFeasiblePrimalDualData(prob.P, prob.A, prob.cone_spec, rng, prob.q, prob.b);
+  return prob;
+}
+
 }  // namespace conicxx::bench

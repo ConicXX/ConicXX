@@ -39,6 +39,8 @@ struct Result {
   int iterations = 0;
   double solve_ms = 0.0;
   double primal_res = 0.0, dual_res = 0.0, gap = 0.0;
+
+  double msPerIter() const { return solve_ms / static_cast<double>(std::max(iterations, 1)); }
 };
 
 Result runOne(const BenchProblem& p, int trial) {
@@ -70,15 +72,15 @@ Result runOne(const BenchProblem& p, int trial) {
 }
 
 void printHeader() {
-  std::printf("%-13s %-24s %5s %-15s %6s %10s %10s %10s %10s\n", "Family", "Size", "Trial",
-              "Status", "Iters", "Time(ms)", "PrimalRes", "DualRes", "Gap");
-  std::printf("%s\n", std::string(115, '-').c_str());
+  std::printf("%-16s %-24s %5s %-15s %6s %10s %12s %10s %10s %10s\n", "Family", "Size", "Trial",
+              "Status", "Iters", "Time(ms)", "Time/Iter(ms)", "PrimalRes", "DualRes", "Gap");
+  std::printf("%s\n", std::string(130, '-').c_str());
 }
 
 void printRow(const Result& r) {
-  std::printf("%-13s %-24s %5d %-15s %6d %10.3f %10.2e %10.2e %10.2e\n", r.family.c_str(),
+  std::printf("%-16s %-24s %5d %-15s %6d %10.3f %12.4f %10.2e %10.2e %10.2e\n", r.family.c_str(),
               r.size_label.c_str(), r.trial, toString(r.status), r.iterations, r.solve_ms,
-              r.primal_res, r.dual_res, r.gap);
+              r.msPerIter(), r.primal_res, r.dual_res, r.gap);
 }
 
 void printSummary(const std::vector<Result>& group) {
@@ -117,6 +119,7 @@ void runFamily(const std::string& family, const std::vector<Index>& sizes, int t
       const BenchProblem p = make(size, rng);
       Result r = runOne(p, trial);
       printRow(r);
+      std::fflush(stdout);
       group.push_back(r);
       all_ok = all_ok && (r.status == Status::Solved);
     }
@@ -165,6 +168,17 @@ int main() {
   runFamily(
       "FrictionChain", {4, 16, 64}, kTrials,
       [](Index num_contacts, std::mt19937& rng) { return makeFrictionChain(num_contacts, 0.7, rng); },
+      all_ok);
+
+  // Arbitrary-size scaling benchmark: sized after a real per-timestep
+  // multibody friction-contact problem reported against this solver
+  // (zero=4944, soc_blocks=66). 66 is included exactly as one data point;
+  // the smaller/larger points show the scaling trend of KKT factorization
+  // cost as the problem grows. Fewer trials than the other families since
+  // instances get large -- keeps total runtime reasonable.
+  runFamily(
+      "FrictionChainXL", {8, 33, 66, 264}, /*trials=*/2,
+      [](Index num_contacts, std::mt19937& rng) { return makeFrictionChainXL(num_contacts, 0.7, rng); },
       all_ok);
 
   std::printf("\n%s\n", all_ok ? "ALL BENCHMARKS CONVERGED (Status::Solved)."
