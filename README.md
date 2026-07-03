@@ -143,6 +143,11 @@ projected onto a Coulomb friction cone, solved once per "timestep" via `Solver::
 Consume from another CMake project via `find_package(conicxx CONFIG REQUIRED)`,
 `add_subdirectory`, or `FetchContent` -- all three expose the same `conicxx::conicxx` target.
 
+ConicXX follows [semantic versioning](https://semver.org/); the single source of truth is the
+`project(conicxx VERSION ...)` call in the top-level `CMakeLists.txt`. `find_package(conicxx
+1.2.3 CONFIG REQUIRED)` version-checks against it, and `<conicxx/version.h>` exposes it to C++
+code as `CONICXX_VERSION_{MAJOR,MINOR,PATCH}` / `CONICXX_VERSION_STRING` and `conicxx::version()`.
+
 ## Benchmarks
 
 `benchmarks/` contains a small, deterministic performance suite (`conicxx_benchmarks`, also

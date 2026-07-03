@@ -34,6 +34,7 @@ add_executable(conicxx_tests
   solver/test_solve_dense_input.cpp
   solver/test_infeasible.cpp
   solver/test_update_reuse.cpp
+  version/test_version.cpp
 )
 
 target_link_libraries(conicxx_tests PRIVATE conicxx::conicxx GTest::gtest_main)

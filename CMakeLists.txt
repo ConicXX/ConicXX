@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(conicxx VERSION 0.1.0 LANGUAGES CXX)
+project(conicxx VERSION 0.0.1 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -49,6 +49,16 @@ endif()
 
 include(cmake/CompilerWarnings.cmake)
 
+# --- Version header ---
+# Single source of truth for the version number is the project() call above;
+# everything else (this header, the shared-library SOVERSION, and the
+# installed CMake package-version file below) derives from it.
+configure_file(
+  include/conicxx/version.h.in
+  ${CMAKE_CURRENT_BINARY_DIR}/include/conicxx/version.h
+  @ONLY
+)
+
 # --- Library target ---
 set(CONICXX_SOURCES
   src/conicxx/cones/zero_cone.cpp
@@ -62,6 +72,7 @@ set(CONICXX_SOURCES
   src/conicxx/solution.cpp
   src/conicxx/solver.cpp
   src/conicxx/solver_impl.cpp
+  src/conicxx/version.cpp
 )
 
 if(CONICXX_BUILD_SHARED)
@@ -74,6 +85,7 @@ add_library(conicxx::conicxx ALIAS conicxx)
 target_include_directories(conicxx
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -112,7 +124,10 @@ if(CONICXX_INSTALL)
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
   )
-  install(DIRECTORY include/conicxx DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  install(DIRECTORY include/conicxx DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    PATTERN "*.in" EXCLUDE)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/include/conicxx/version.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/conicxx)
 
   install(EXPORT conicxxTargets
     FILE conicxx-targets.cmake
