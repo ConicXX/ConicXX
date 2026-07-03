@@ -153,30 +153,42 @@ void KktSystem::writeRegularizedDiagonal(SparseMat& K, Scalar extra_p_reg,
   }
 }
 
+bool KktSystem::tryFactorizeWithBump(Scalar extra_p, Scalar extra_a) {
+  // Pattern is fixed after setup()'s one-time analyzePattern() call, so only
+  // factorize() (numeric refactorization) is needed here -- never compute(),
+  // which would redo the fill-reducing symbolic analysis from scratch on
+  // every IPM iteration. The K_ copy is only needed when a dynamic-
+  // regularization bump must be applied on top of it; the common (no-retry)
+  // case factorizes K_ directly.
+  if (extra_p != 0.0 || extra_a != 0.0) {
+    SparseMat K_try = K_;
+    writeRegularizedDiagonal(K_try, extra_p, extra_a);
+    ldlt_.factorize(K_try);
+  } else {
+    ldlt_.factorize(K_);
+  }
+  if (ldlt_.info() != Eigen::Success) return false;
+  const Vec D = ldlt_.vectorD();
+  const Scalar minAbsD = D.size() > 0 ? D.array().abs().minCoeff() : Scalar(1.0);
+  return std::isfinite(minAbsD) && minAbsD > dynamic_reg_eps_;
+}
+
 bool KktSystem::factorizeWithRetry() {
   Scalar extra_p = 0.0, extra_a = 0.0;
-  constexpr int kMaxRetries = 8;
+  // 8 attempts of x10 (capping out around 1e-3 above dynamic_reg_delta_'s
+  // ~1e-10 floor) was calibrated for a pivot just barely underflowing
+  // dynamic_reg_eps_ -- verified against a real large multi-contact problem
+  // to be far too weak for a badly-scaled cone block that needs several more
+  // orders of magnitude of regularization to clear the same check. Growing
+  // further (still x10, so small-bump cases still resolve in a couple of
+  // attempts) costs nothing extra when the first attempt already succeeds.
+  constexpr int kMaxRetries = 18;
   for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
-    // Pattern is fixed after setup()'s one-time analyzePattern() call, so
-    // only factorize() (numeric refactorization) is needed here -- never
-    // compute(), which would redo the fill-reducing symbolic analysis from
-    // scratch on every IPM iteration. The K_ copy is only needed when a
-    // dynamic-regularization bump must be applied on top of it; the common
-    // (no-retry) case factorizes K_ directly.
-    if (extra_p != 0.0 || extra_a != 0.0) {
-      SparseMat K_try = K_;
-      writeRegularizedDiagonal(K_try, extra_p, extra_a);
-      ldlt_.factorize(K_try);
-    } else {
-      ldlt_.factorize(K_);
-    }
-    if (ldlt_.info() == Eigen::Success) {
-      const Vec D = ldlt_.vectorD();
-      const Scalar minAbsD = D.size() > 0 ? D.array().abs().minCoeff() : Scalar(1.0);
-      if (std::isfinite(minAbsD) && minAbsD > dynamic_reg_eps_) {
-        factorized_ = true;
-        return true;
-      }
+    if (tryFactorizeWithBump(extra_p, extra_a)) {
+      factorized_ = true;
+      last_extra_p_ = extra_p;
+      last_extra_a_ = extra_a;
+      return true;
     }
     extra_p = std::max(extra_p * 10.0, dynamic_reg_delta_);
     extra_a = std::max(extra_a * 10.0, dynamic_reg_delta_);
@@ -185,8 +197,39 @@ bool KktSystem::factorizeWithRetry() {
   return false;
 }
 
-Scalar KktSystem::solve(const Vec& rhs, Vec& x_out) const {
+bool KktSystem::escalateAndResolve(const Vec& rhs, Vec& x_out) {
+  // factorizeWithRetry()'s per-pivot |D| >= dynamic_reg_eps_ check can be
+  // satisfied by a bump far too small to matter -- e.g. a P-diagonal pivot
+  // already sitting exactly at the static-regularization floor clears that
+  // check trivially, even while a *different* pivot has grown many orders
+  // of magnitude larger (from a near-degenerate cone's NT scaling), leaving
+  // the min/max pivot spread enormous and the actual solve for a specific
+  // rhs prone to overflow despite the "successful" factorization. The
+  // ×10-per-attempt ladder used there is calibrated to nudge a small pivot
+  // just past dynamic_reg_eps_, which is far too slow to close a spread of
+  // several orders of magnitude within a handful of attempts -- so here we
+  // grow far more aggressively (x1000/attempt) and use the one signal that
+  // actually reflects whether it worked: does ldlt_.solve(rhs) come back
+  // finite, not just whether some abstract pivot-magnitude heuristic passed.
+  constexpr int kMaxEscalations = 10;
+  Scalar extra_p = last_extra_p_, extra_a = last_extra_a_;
+  for (int attempt = 0; attempt < kMaxEscalations; ++attempt) {
+    extra_p = std::max(extra_p * 1000.0, dynamic_reg_delta_);
+    extra_a = std::max(extra_a * 1000.0, dynamic_reg_delta_);
+    if (!tryFactorizeWithBump(extra_p, extra_a)) continue;
+    x_out = ldlt_.solve(rhs);
+    if (x_out.allFinite()) {
+      last_extra_p_ = extra_p;
+      last_extra_a_ = extra_a;
+      return true;
+    }
+  }
+  return false;
+}
+
+Scalar KktSystem::solve(const Vec& rhs, Vec& x_out) {
   x_out = ldlt_.solve(rhs);
+  if (!x_out.allFinite()) escalateAndResolve(rhs, x_out);
 
   const Scalar rhsNorm = std::max(rhs.norm(), Scalar(1e-30));
   Vec r = rhs - K_.selfadjointView<Eigen::Lower>() * x_out;

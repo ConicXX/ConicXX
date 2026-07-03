@@ -61,8 +61,12 @@ class KktSystem {
 
   /// Solve K * x = rhs using the current factorization plus iterative
   /// refinement against the (statically-regularized only) system matrix.
-  /// Returns the achieved relative residual norm.
-  Scalar solve(const Vec& rhs, Vec& x_out) const;
+  /// Returns the achieved relative residual norm. If the solve produces a
+  /// non-finite result (the accepted factorization was fine by its pivot
+  /// check but still numerically inadequate for this particular rhs -- see
+  /// escalateAndResolve()), transparently bumps regularization further and
+  /// retries in place before giving up.
+  Scalar solve(const Vec& rhs, Vec& x_out);
 
   Index n() const { return n_; }
   Index m() const { return m_; }
@@ -72,6 +76,27 @@ class KktSystem {
  private:
   bool factorizeWithRetry();
   void writeRegularizedDiagonal(SparseMat& K, Scalar extra_p_reg, Scalar extra_a_reg) const;
+
+  /// Factorizes K_ (bumped by extra_p/extra_a if either is nonzero) and
+  /// reports whether the result is usable: Eigen::Success and every |D|
+  /// pivot above dynamic_reg_eps_. Shared by factorizeWithRetry() (initial
+  /// factorization) and escalateAndResolve() (post-solve escalation).
+  bool tryFactorizeWithBump(Scalar extra_p, Scalar extra_a);
+
+  /// Called by solve() when ldlt_.solve() returns a non-finite result even
+  /// though factorizeWithRetry() accepted the factorization (its per-pivot
+  /// magnitude check can pass while the pivot *spread* -- min vs. max |D| --
+  /// is still large enough to blow up for a particular rhs, e.g. a
+  /// near-degenerate cone block whose NT scaling makes one KKT diagonal
+  /// entry orders of magnitude larger than another that's already at the
+  /// static-regularization floor). Bumps regularization far more
+  /// aggressively than factorizeWithRetry() (whose small, pivot-floor-only
+  /// bumps can be satisfied without denting the actual pivot spread) and
+  /// refactorizes, re-solving rhs after each bump until the result is
+  /// finite. On success, writes the finite result to x_out and returns
+  /// true; returns false (x_out left at its last, still non-finite value)
+  /// if attempts are exhausted.
+  bool escalateAndResolve(const Vec& rhs, Vec& x_out);
 
   Index n_ = 0, m_ = 0;
   Scalar static_reg_p_ = 0, static_reg_a_ = 0;
@@ -83,6 +108,11 @@ class KktSystem {
   SparseMat K_;  // statically-regularized "true" matrix (no dynamic bump)
   Eigen::SimplicialLDLT<SparseMat, Eigen::Lower> ldlt_;
   bool factorized_ = false;
+  // Regularization bump used to obtain the *current* ldlt_ factorization
+  // (0 unless factorizeWithRetry() needed to bump past the statically-
+  // regularized K_ to clear its pivot-magnitude check). escalateAndResolve()
+  // continues bumping from here rather than restarting at 0.
+  Scalar last_extra_p_ = 0, last_extra_a_ = 0;
 
   // Slot bookkeeping, in terms of (row, col) pairs kept alongside for
   // robust value lookup via SparseMatrix::coeff() on updateData.
