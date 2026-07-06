@@ -3,6 +3,11 @@
 #include <Eigen/OrderingMethods>
 #include <algorithm>
 
+// QDLDL_factor/QDLDL_etree's argument lists are specific to the pinned v0.1.9 (see
+// CMakeLists.txt's FetchContent GIT_TAG) -- an older or newer vendored qdldl pulled in ahead of
+// conicxx's own fetch (e.g. via find_package(qdldl) resolving to a sibling dependency's vendored
+// copy first) can have a different signature and fail to compile here with a confusing "too
+// few/many arguments" error rather than a version-mismatch one.
 #include <qdldl.h>
 
 namespace conicxx::detail {

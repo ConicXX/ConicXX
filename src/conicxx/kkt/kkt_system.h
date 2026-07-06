@@ -52,10 +52,14 @@ namespace conicxx::detail {
 /// outer retry loop: factorize with the current regularization, inspect the resulting pivots
 /// (D from LDL^T) for magnitude, and if any are too small, bump the regularization and
 /// refactorize from scratch (up to a few times). RegularizedLdlt instead corrects a bad pivot
-/// in place as soon as it is computed, so this retry loop is (for that backend) effectively
-/// always satisfied on the first attempt -- it stays in place uniformly across all three
-/// backends rather than being special-cased away, since it is harmless overhead when it never
-/// fires. The *unregularized* (well, only statically-regularized) matrix is kept
+/// in place as soon as it is computed, so this retry loop is satisfied on the first attempt in
+/// the common case -- but RegularizedLdlt::info() still reports failure (rather than always
+/// succeeding) when too large a fraction of pivots needed correcting in one call, so this same
+/// retry loop remains a real backstop for it too, not dead code: a per-pivot nudge that's
+/// individually sound can still fail to produce a good enough factorization when a large
+/// fraction of pivots need it at once (see regularized_ldlt.cpp's kMaxRegularizedFraction),
+/// and the uniform whole-matrix bump here is the fallback for that case, same as for the other
+/// two backends. The *unregularized* (well, only statically-regularized) matrix is kept
 /// separately so iterative refinement converges to the solution of the
 /// intended system, not the dynamically over-regularized one used only to
 /// obtain a stable factorization.

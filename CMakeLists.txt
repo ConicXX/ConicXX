@@ -54,6 +54,12 @@ if(CONICXX_WITH_QDLDL)
   if(NOT qdldl_FOUND)
     message(STATUS "conicxx: system qdldl not found, fetching qdldl v0.1.9 via FetchContent")
     include(FetchContent)
+    # FORCE (not qdldl's own option() defaults): a sibling dependency that already vendors qdldl
+    # and caches QDLDL_BUILD_STATIC_LIB itself (e.g. an older copy bundled with another solver)
+    # makes qdldl's own `option(QDLDL_BUILD_STATIC_LIB ON)` a silent no-op -- option() never
+    # overrides an already-cached variable -- so qdldlstatic doesn't get built and the
+    # qdldl::qdldl alias below fails. Forcing it here the same way as the others avoids that.
+    set(QDLDL_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
     set(QDLDL_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
     set(QDLDL_BUILD_DEMO_EXE OFF CACHE BOOL "" FORCE)
     set(QDLDL_UNITTESTS OFF CACHE BOOL "" FORCE)
@@ -99,6 +105,7 @@ set(CONICXX_SOURCES
   src/conicxx/solver.cpp
   src/conicxx/solver_impl.cpp
   src/conicxx/version.cpp
+  src/conicxx/backend_comparison.cpp
 )
 
 if(CONICXX_WITH_QDLDL)

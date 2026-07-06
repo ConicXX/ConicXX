@@ -9,11 +9,16 @@ namespace conicxx::detail {
 
 /// A sparse LDL^T backend with true per-pivot dynamic regularization, in the style of the
 /// "Davis-style" regularized LDL used by ECOS/CVXGEN (Domahidi/Chu/Boyd): each diagonal pivot
-/// is checked for the correct sign and minimum magnitude *as it is computed*, and replaced
-/// in place with a signed floor value before it is used in the Schur-complement update for
-/// any later pivot -- unlike KktSystem's outer factorizeWithRetry()/escalateAndResolve() retry
-/// loop (used by the Eigen/QdldlLdlt backends), which can only react to a bad pivot by
-/// refactorizing the *entire* matrix from scratch with a larger uniform bump.
+/// is checked for the correct sign and minimum magnitude *as it is computed*, and nudged
+/// (regularization added on top of the naturally-computed value, not substituted for it -- see
+/// regularizePivot() in regularized_ldlt.cpp for why a full replacement distorted convergence on
+/// large problems) before it is used in the Schur-complement update for any later pivot --
+/// unlike KktSystem's outer factorizeWithRetry()/escalateAndResolve() retry loop (used by the
+/// Eigen/QdldlLdlt backends), which can only react to a bad pivot by refactorizing the *entire*
+/// matrix from scratch with a larger uniform bump. If too many pivots need correcting in one
+/// factorize() call, info() reports Eigen::NumericalIssue instead of Success so that outer retry
+/// loop still gets a chance to react with its uniform bump, the same backstop Eigen/QdldlLdlt get
+/// -- see numRegularizedPivots().
 ///
 /// This is a derivative of QDLDL's (github.com/osqp/qdldl, Apache-2.0) numeric factorization
 /// loop: the symbolic analysis (elimination tree/Lnz via QDLDL_etree) and the triangular solves
@@ -38,14 +43,23 @@ class RegularizedLdlt {
 
   /// Refreshes the permuted-upper mirror of K_lower's values and runs the regularized numeric
   /// factorization. K_lower must have the same sparsity pattern passed to the last
-  /// analyzePattern() call. Always succeeds (info() == Eigen::Success): a pivot that is too
-  /// small or has the wrong sign is corrected in place rather than aborting the factorization.
+  /// analyzePattern() call. A pivot that is too small or has the wrong sign is corrected in
+  /// place rather than aborting the factorization -- but see info(): if that happens for too
+  /// large a fraction of pivots, factorize() still reports failure rather than silently
+  /// returning a factorization from a heavily-doctored matrix.
   void factorize(const SparseMat& K_lower);
 
   /// Solves K_lower * x = rhs using the current factorization.
   Vec solve(const Vec& rhs) const;
 
+  /// Eigen::NumericalIssue if more than kMaxRegularizedFraction of pivots needed correction in
+  /// the last factorize() call (see regularized_ldlt.cpp) -- lets KktSystem's
+  /// factorizeWithRetry() fall back to its uniform whole-matrix bump instead of accepting a
+  /// factorization built from many independently-doctored pivots. Otherwise Eigen::Success.
   Eigen::ComputationInfo info() const { return info_; }
+
+  /// Number of pivots corrected by the last factorize() call (0 on a clean factorization).
+  Index numRegularizedPivots() const { return num_regularized_pivots_; }
 
   /// D from the LDL^T factorization, in the *permuted* variable order -- see QdldlLdlt::vectorD
   /// for why callers don't need it undone (only used for aggregate min/max-magnitude checks).
@@ -68,6 +82,7 @@ class RegularizedLdlt {
   Index n_ = 0;
   Scalar dynamic_reg_eps_ = 0, dynamic_reg_delta_ = 0;
   Eigen::ComputationInfo info_ = Eigen::NumericalIssue;
+  Index num_regularized_pivots_ = 0;
 };
 
 }  // namespace conicxx::detail
