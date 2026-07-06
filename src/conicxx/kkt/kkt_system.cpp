@@ -32,12 +32,15 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
   factorized_ = false;
 
   use_qdldl_ = settings.linear_solver == LinearSolverBackend::Qdldl;
+  use_regularized_ = settings.linear_solver == LinearSolverBackend::RegularizedLdlt;
 #ifndef CONICXX_HAVE_QDLDL
-  if (use_qdldl_) {
+  if (use_qdldl_ || use_regularized_) {
     std::fprintf(stderr,
-                 "[conicxx] warning: Settings::linear_solver requested Qdldl, but conicxx was "
-                 "built without it (CONICXX_WITH_QDLDL=OFF) -- falling back to Eigen\n");
+                 "[conicxx] warning: Settings::linear_solver requested %s, but conicxx was "
+                 "built without it (CONICXX_WITH_QDLDL=OFF) -- falling back to Eigen\n",
+                 use_regularized_ ? "RegularizedLdlt" : "Qdldl");
     use_qdldl_ = false;
+    use_regularized_ = false;
   }
 #endif
 
@@ -166,6 +169,10 @@ void KktSystem::writeRegularizedDiagonal(SparseMat& K, Scalar extra_p_reg,
 
 void KktSystem::backendAnalyzePattern(const SparseMat& K) {
 #ifdef CONICXX_HAVE_QDLDL
+  if (use_regularized_) {
+    ldlt_reg_.analyzePattern(K, n_, dynamic_reg_eps_, dynamic_reg_delta_);
+    return;
+  }
   if (use_qdldl_) {
     ldlt_qdldl_.analyzePattern(K);
     return;
@@ -176,6 +183,10 @@ void KktSystem::backendAnalyzePattern(const SparseMat& K) {
 
 void KktSystem::backendFactorize(const SparseMat& K) {
 #ifdef CONICXX_HAVE_QDLDL
+  if (use_regularized_) {
+    ldlt_reg_.factorize(K);
+    return;
+  }
   if (use_qdldl_) {
     ldlt_qdldl_.factorize(K);
     return;
@@ -186,6 +197,7 @@ void KktSystem::backendFactorize(const SparseMat& K) {
 
 Eigen::ComputationInfo KktSystem::backendInfo() const {
 #ifdef CONICXX_HAVE_QDLDL
+  if (use_regularized_) return ldlt_reg_.info();
   if (use_qdldl_) return ldlt_qdldl_.info();
 #endif
   return ldlt_eigen_.info();
@@ -193,6 +205,7 @@ Eigen::ComputationInfo KktSystem::backendInfo() const {
 
 Vec KktSystem::backendVectorD() const {
 #ifdef CONICXX_HAVE_QDLDL
+  if (use_regularized_) return ldlt_reg_.vectorD();
   if (use_qdldl_) return ldlt_qdldl_.vectorD();
 #endif
   return ldlt_eigen_.vectorD();
@@ -200,6 +213,7 @@ Vec KktSystem::backendVectorD() const {
 
 Vec KktSystem::backendSolve(const Vec& rhs) const {
 #ifdef CONICXX_HAVE_QDLDL
+  if (use_regularized_) return ldlt_reg_.solve(rhs);
   if (use_qdldl_) return ldlt_qdldl_.solve(rhs);
 #endif
   return ldlt_eigen_.solve(rhs);

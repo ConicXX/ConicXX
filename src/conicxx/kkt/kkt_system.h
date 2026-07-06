@@ -10,6 +10,7 @@
 
 #ifdef CONICXX_HAVE_QDLDL
 #include "conicxx/kkt/qdldl_ldlt.h"
+#include "conicxx/kkt/regularized_ldlt.h"
 #endif
 
 namespace conicxx::detail {
@@ -38,20 +39,23 @@ namespace conicxx::detail {
 ///   - `updateScalingAndFactorize()` overwrites the Hs (NT-scaling) block
 ///     values (the per-IPM-iteration path) and refactorizes.
 ///
-/// Backend: factorizes/solves via either Eigen::SimplicialLDLT or QdldlLdlt
-/// (github.com/osqp/qdldl, the backend QOCO/Clarabel use), selected once in
-/// setup() from Settings::linear_solver and dispatched through
+/// Backend: factorizes/solves via Eigen::SimplicialLDLT, QdldlLdlt
+/// (github.com/osqp/qdldl, the backend QOCO/Clarabel use), or RegularizedLdlt (a modified QDLDL
+/// numeric factorization loop with true per-pivot dynamic regularization, Davis/ECOS-style),
+/// selected once in setup() from Settings::linear_solver and dispatched through
 /// backendAnalyzePattern()/backendFactorize()/backendInfo()/backendVectorD()/
 /// backendSolve() -- everything else in this class is written against those
 /// five calls and does not know which concrete backend is active.
 ///
-/// Regularization: neither backend supports intercepting individual pivots
-/// mid-factorization (unlike e.g. a custom Davis-style sparse LDL used by
-/// ECOS/CVXGEN), so "dynamic regularization" here is implemented as an outer
-/// retry loop: factorize with the current regularization, inspect the
-/// resulting pivots (D from LDL^T) for magnitude, and if any are too small,
-/// bump the regularization and refactorize from scratch (up to a few times).
-/// The *unregularized* (well, only statically-regularized) matrix is kept
+/// Regularization: Eigen::SimplicialLDLT and QdldlLdlt cannot intercept individual pivots
+/// mid-factorization, so for those two backends "dynamic regularization" is implemented as an
+/// outer retry loop: factorize with the current regularization, inspect the resulting pivots
+/// (D from LDL^T) for magnitude, and if any are too small, bump the regularization and
+/// refactorize from scratch (up to a few times). RegularizedLdlt instead corrects a bad pivot
+/// in place as soon as it is computed, so this retry loop is (for that backend) effectively
+/// always satisfied on the first attempt -- it stays in place uniformly across all three
+/// backends rather than being special-cased away, since it is harmless overhead when it never
+/// fires. The *unregularized* (well, only statically-regularized) matrix is kept
 /// separately so iterative refinement converges to the solution of the
 /// intended system, not the dynamically over-regularized one used only to
 /// obtain a stable factorization.
@@ -128,8 +132,10 @@ class KktSystem {
   Eigen::SimplicialLDLT<SparseMat, Eigen::Lower> ldlt_eigen_;
 #ifdef CONICXX_HAVE_QDLDL
   QdldlLdlt ldlt_qdldl_;
+  RegularizedLdlt ldlt_reg_;
 #endif
   bool use_qdldl_ = false;
+  bool use_regularized_ = false;
   bool factorized_ = false;
   // Regularization bump used to obtain the *current* ldlt_ factorization
   // (0 unless factorizeWithRetry() needed to bump past the statically-

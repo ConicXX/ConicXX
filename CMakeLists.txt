@@ -102,7 +102,7 @@ set(CONICXX_SOURCES
 )
 
 if(CONICXX_WITH_QDLDL)
-  list(APPEND CONICXX_SOURCES src/conicxx/kkt/qdldl_ldlt.cpp)
+  list(APPEND CONICXX_SOURCES src/conicxx/kkt/qdldl_ldlt.cpp src/conicxx/kkt/regularized_ldlt.cpp)
 endif()
 
 if(CONICXX_BUILD_SHARED)

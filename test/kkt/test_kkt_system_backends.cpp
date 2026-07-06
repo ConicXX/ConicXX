@@ -121,7 +121,15 @@ TEST_P(KktSystemBackends, HandlesRankDeficientEqualityBlockViaRegularization) {
 
 INSTANTIATE_TEST_SUITE_P(
     EigenAndQdldl, KktSystemBackends,
-    ::testing::Values(LinearSolverBackend::Eigen, LinearSolverBackend::Qdldl),
+    ::testing::Values(LinearSolverBackend::Eigen, LinearSolverBackend::Qdldl,
+                      LinearSolverBackend::RegularizedLdlt),
     [](const ::testing::TestParamInfo<LinearSolverBackend>& param_info) {
-      return param_info.param == LinearSolverBackend::Qdldl ? "Qdldl" : "Eigen";
+      switch (param_info.param) {
+        case LinearSolverBackend::Qdldl:
+          return "Qdldl";
+        case LinearSolverBackend::RegularizedLdlt:
+          return "RegularizedLdlt";
+        default:
+          return "Eigen";
+      }
     });

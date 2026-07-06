@@ -9,6 +9,11 @@ enum class LinearSolverBackend {
   Eigen,  ///< Eigen::SimplicialLDLT (always available)
   Qdldl,  ///< github.com/osqp/qdldl -- the backend QOCO/Clarabel use, if built with
           ///< CONICXX_WITH_QDLDL (falls back to Eigen with a one-time warning otherwise)
+  RegularizedLdlt,  ///< Davis/ECOS-style true per-pivot dynamic regularization (a modified
+                    ///< QDLDL numeric factorization loop), if built with CONICXX_WITH_QDLDL
+                    ///< (falls back to Eigen with a one-time warning otherwise); corrects a
+                    ///< bad pivot inline during elimination instead of KktSystem's outer
+                    ///< refactorize-from-scratch retry loop
 };
 
 /// Solver configuration. A plain aggregate so it is cheap to copy and easy
