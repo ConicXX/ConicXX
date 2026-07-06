@@ -8,6 +8,10 @@
 #include "conicxx/settings.h"
 #include "conicxx/types.h"
 
+#ifdef CONICXX_HAVE_QDLDL
+#include "conicxx/kkt/qdldl_ldlt.h"
+#endif
+
 namespace conicxx::detail {
 
 /// Assembles and factorizes the augmented KKT system
@@ -34,17 +38,23 @@ namespace conicxx::detail {
 ///   - `updateScalingAndFactorize()` overwrites the Hs (NT-scaling) block
 ///     values (the per-IPM-iteration path) and refactorizes.
 ///
-/// Regularization: Eigen's SimplicialLDLT does not support intercepting
-/// individual pivots mid-factorization (unlike e.g. a custom Davis-style
-/// sparse LDL used by ECOS/CVXGEN), so "dynamic regularization" here is
-/// implemented as an outer retry loop: factorize with the current
-/// regularization, inspect the resulting pivots (D from LDL^T) for
-/// magnitude, and if any are too small, bump the regularization and
-/// refactorize from scratch (up to a few times). The *unregularized* (well,
-/// only statically-regularized) matrix is kept separately so iterative
-/// refinement converges to the solution of the intended system, not the
-/// dynamically over-regularized one used only to obtain a stable
-/// factorization.
+/// Backend: factorizes/solves via either Eigen::SimplicialLDLT or QdldlLdlt
+/// (github.com/osqp/qdldl, the backend QOCO/Clarabel use), selected once in
+/// setup() from Settings::linear_solver and dispatched through
+/// backendAnalyzePattern()/backendFactorize()/backendInfo()/backendVectorD()/
+/// backendSolve() -- everything else in this class is written against those
+/// five calls and does not know which concrete backend is active.
+///
+/// Regularization: neither backend supports intercepting individual pivots
+/// mid-factorization (unlike e.g. a custom Davis-style sparse LDL used by
+/// ECOS/CVXGEN), so "dynamic regularization" here is implemented as an outer
+/// retry loop: factorize with the current regularization, inspect the
+/// resulting pivots (D from LDL^T) for magnitude, and if any are too small,
+/// bump the regularization and refactorize from scratch (up to a few times).
+/// The *unregularized* (well, only statically-regularized) matrix is kept
+/// separately so iterative refinement converges to the solution of the
+/// intended system, not the dynamically over-regularized one used only to
+/// obtain a stable factorization.
 class KktSystem {
  public:
   bool setup(const SparseMat& P_upper, const SparseMat& A, const ConeSet& cones,
@@ -83,7 +93,7 @@ class KktSystem {
   /// factorization) and escalateAndResolve() (post-solve escalation).
   bool tryFactorizeWithBump(Scalar extra_p, Scalar extra_a);
 
-  /// Called by solve() when ldlt_.solve() returns a non-finite result even
+  /// Called by solve() when backendSolve() returns a non-finite result even
   /// though factorizeWithRetry() accepted the factorization (its per-pivot
   /// magnitude check can pass while the pivot *spread* -- min vs. max |D| --
   /// is still large enough to blow up for a particular rhs, e.g. a
@@ -98,6 +108,15 @@ class KktSystem {
   /// if attempts are exhausted.
   bool escalateAndResolve(const Vec& rhs, Vec& x_out);
 
+  // Backend dispatch: the rest of the class (regularization retry/escalation, iterative
+  // refinement) is written entirely in terms of these five calls and knows nothing about which
+  // concrete backend (Eigen::SimplicialLDLT or QdldlLdlt) is active.
+  void backendAnalyzePattern(const SparseMat& K);
+  void backendFactorize(const SparseMat& K);
+  Eigen::ComputationInfo backendInfo() const;
+  Vec backendVectorD() const;
+  Vec backendSolve(const Vec& rhs) const;
+
   Index n_ = 0, m_ = 0;
   Scalar static_reg_p_ = 0, static_reg_a_ = 0;
   Scalar dynamic_reg_eps_ = 0, dynamic_reg_delta_ = 0;
@@ -106,7 +125,11 @@ class KktSystem {
 
   SparsityMap sparsity_;
   SparseMat K_;  // statically-regularized "true" matrix (no dynamic bump)
-  Eigen::SimplicialLDLT<SparseMat, Eigen::Lower> ldlt_;
+  Eigen::SimplicialLDLT<SparseMat, Eigen::Lower> ldlt_eigen_;
+#ifdef CONICXX_HAVE_QDLDL
+  QdldlLdlt ldlt_qdldl_;
+#endif
+  bool use_qdldl_ = false;
   bool factorized_ = false;
   // Regularization bump used to obtain the *current* ldlt_ factorization
   // (0 unless factorizeWithRetry() needed to bump past the statically-

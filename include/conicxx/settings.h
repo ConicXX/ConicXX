@@ -4,6 +4,13 @@
 
 namespace conicxx {
 
+/// Which sparse LDL^T backend factorizes/solves the KKT system.
+enum class LinearSolverBackend {
+  Eigen,  ///< Eigen::SimplicialLDLT (always available)
+  Qdldl,  ///< github.com/osqp/qdldl -- the backend QOCO/Clarabel use, if built with
+          ///< CONICXX_WITH_QDLDL (falls back to Eigen with a one-time warning otherwise)
+};
+
 /// Solver configuration. A plain aggregate so it is cheap to copy and easy
 /// to construct with designated-initializer-style usage.
 struct Settings {
@@ -42,6 +49,11 @@ struct Settings {
 
   // --- Input validation ---
   bool validate_inputs = true;
+
+  // --- Linear solver backend ---
+  /// Defaults to Qdldl (github.com/osqp/qdldl, the same backend QOCO/Clarabel use) when built
+  /// with CONICXX_WITH_QDLDL; falls back to Eigen with a one-time warning otherwise.
+  LinearSolverBackend linear_solver = LinearSolverBackend::Qdldl;
 };
 
 }  // namespace conicxx

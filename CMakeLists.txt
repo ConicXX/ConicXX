@@ -21,6 +21,7 @@ option(CONICXX_BUILD_EXAMPLES "Build example programs" ${PROJECT_IS_TOP_LEVEL})
 option(CONICXX_BUILD_BENCHMARKS "Build the benchmark suite" ${PROJECT_IS_TOP_LEVEL})
 option(CONICXX_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(CONICXX_INSTALL "Generate install/export rules" ${PROJECT_IS_TOP_LEVEL})
+option(CONICXX_WITH_QDLDL "Build with the QDLDL sparse LDL^T backend (github.com/osqp/qdldl)" ON)
 
 # --- Dependencies: Eigen (header-only), find_package first, FetchContent fallback ---
 find_package(Eigen3 3.4 QUIET NO_MODULE)
@@ -45,6 +46,31 @@ if(NOT Eigen3_FOUND)
   endif()
 else()
   message(STATUS "conicxx: using system Eigen3 (${Eigen3_VERSION})")
+endif()
+
+# --- Dependencies: QDLDL (optional sparse LDL^T backend), same find/fetch pattern as Eigen ---
+if(CONICXX_WITH_QDLDL)
+  find_package(qdldl QUIET)
+  if(NOT qdldl_FOUND)
+    message(STATUS "conicxx: system qdldl not found, fetching qdldl v0.1.9 via FetchContent")
+    include(FetchContent)
+    set(QDLDL_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
+    set(QDLDL_BUILD_DEMO_EXE OFF CACHE BOOL "" FORCE)
+    set(QDLDL_UNITTESTS OFF CACHE BOOL "" FORCE)
+    set(QDLDL_LONG OFF CACHE BOOL "" FORCE)  # QDLDL_int == int, matching conicxx::Index
+    FetchContent_Declare(
+      qdldl
+      GIT_REPOSITORY https://github.com/osqp/qdldl.git
+      GIT_TAG v0.1.9
+      GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(qdldl)
+    if(NOT TARGET qdldl::qdldl)
+      add_library(qdldl::qdldl ALIAS qdldlstatic)
+    endif()
+  else()
+    message(STATUS "conicxx: using system qdldl")
+  endif()
 endif()
 
 include(cmake/CompilerWarnings.cmake)
@@ -75,6 +101,10 @@ set(CONICXX_SOURCES
   src/conicxx/version.cpp
 )
 
+if(CONICXX_WITH_QDLDL)
+  list(APPEND CONICXX_SOURCES src/conicxx/kkt/qdldl_ldlt.cpp)
+endif()
+
 if(CONICXX_BUILD_SHARED)
   add_library(conicxx SHARED ${CONICXX_SOURCES})
 else()
@@ -91,6 +121,17 @@ target_include_directories(conicxx
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 target_link_libraries(conicxx PUBLIC Eigen3::Eigen)
+if(CONICXX_WITH_QDLDL)
+  target_link_libraries(conicxx PRIVATE qdldl::qdldl)
+  # PUBLIC (not PRIVATE): kkt_system.h is a private header, but the test target reaches into
+  # src/ and includes it directly (see test/CMakeLists.txt), so it must see this macro exactly
+  # like conicxx's own sources do -- otherwise KktSystem (which conditionally has a QdldlLdlt
+  # member) has two different sizes/layouts across translation units, which is undefined
+  # behavior and corrupts the stack (verified: this exact mismatch reliably crashed every
+  # KktSystem test with a stack-buffer-overflow before being caught here). This does not leak
+  # QDLDL into the public API -- no public header under include/conicxx/ is affected.
+  target_compile_definitions(conicxx PUBLIC CONICXX_HAVE_QDLDL)
+endif()
 target_compile_features(conicxx PUBLIC cxx_std_17)
 conicxx_set_warnings(conicxx)
 

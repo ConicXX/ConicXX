@@ -26,6 +26,7 @@ add_executable(conicxx_tests
   convert/test_convert.cpp
   kkt/test_sparsity_map.cpp
   kkt/test_kkt_system.cpp
+  kkt/test_kkt_system_backends.cpp
   kkt/test_equilibration.cpp
   solver/test_solve_qp.cpp
   solver/test_solve_lp.cpp

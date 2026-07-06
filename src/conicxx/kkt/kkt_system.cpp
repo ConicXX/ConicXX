@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace conicxx::detail {
 
@@ -29,6 +30,16 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
   refine_max_iter_ = settings.refine_max_iter;
   refine_tol_ = settings.refine_tol;
   factorized_ = false;
+
+  use_qdldl_ = settings.linear_solver == LinearSolverBackend::Qdldl;
+#ifndef CONICXX_HAVE_QDLDL
+  if (use_qdldl_) {
+    std::fprintf(stderr,
+                 "[conicxx] warning: Settings::linear_solver requested Qdldl, but conicxx was "
+                 "built without it (CONICXX_WITH_QDLDL=OFF) -- falling back to Eigen\n");
+    use_qdldl_ = false;
+  }
+#endif
 
   sparsity_ = SparsityMap();
   p_diag_slots_.clear();
@@ -91,7 +102,7 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
   }
 
   K_ = sparsity_.finalize(n_ + m_, n_ + m_);
-  ldlt_.analyzePattern(K_);
+  backendAnalyzePattern(K_);
 
   p_outer_ref_.assign(P_upper.outerIndexPtr(), P_upper.outerIndexPtr() + P_upper.outerSize() + 1);
   p_inner_ref_.assign(P_upper.innerIndexPtr(), P_upper.innerIndexPtr() + P_upper.nonZeros());
@@ -153,6 +164,47 @@ void KktSystem::writeRegularizedDiagonal(SparseMat& K, Scalar extra_p_reg,
   }
 }
 
+void KktSystem::backendAnalyzePattern(const SparseMat& K) {
+#ifdef CONICXX_HAVE_QDLDL
+  if (use_qdldl_) {
+    ldlt_qdldl_.analyzePattern(K);
+    return;
+  }
+#endif
+  ldlt_eigen_.analyzePattern(K);
+}
+
+void KktSystem::backendFactorize(const SparseMat& K) {
+#ifdef CONICXX_HAVE_QDLDL
+  if (use_qdldl_) {
+    ldlt_qdldl_.factorize(K);
+    return;
+  }
+#endif
+  ldlt_eigen_.factorize(K);
+}
+
+Eigen::ComputationInfo KktSystem::backendInfo() const {
+#ifdef CONICXX_HAVE_QDLDL
+  if (use_qdldl_) return ldlt_qdldl_.info();
+#endif
+  return ldlt_eigen_.info();
+}
+
+Vec KktSystem::backendVectorD() const {
+#ifdef CONICXX_HAVE_QDLDL
+  if (use_qdldl_) return ldlt_qdldl_.vectorD();
+#endif
+  return ldlt_eigen_.vectorD();
+}
+
+Vec KktSystem::backendSolve(const Vec& rhs) const {
+#ifdef CONICXX_HAVE_QDLDL
+  if (use_qdldl_) return ldlt_qdldl_.solve(rhs);
+#endif
+  return ldlt_eigen_.solve(rhs);
+}
+
 bool KktSystem::tryFactorizeWithBump(Scalar extra_p, Scalar extra_a) {
   // Pattern is fixed after setup()'s one-time analyzePattern() call, so only
   // factorize() (numeric refactorization) is needed here -- never compute(),
@@ -163,12 +215,12 @@ bool KktSystem::tryFactorizeWithBump(Scalar extra_p, Scalar extra_a) {
   if (extra_p != 0.0 || extra_a != 0.0) {
     SparseMat K_try = K_;
     writeRegularizedDiagonal(K_try, extra_p, extra_a);
-    ldlt_.factorize(K_try);
+    backendFactorize(K_try);
   } else {
-    ldlt_.factorize(K_);
+    backendFactorize(K_);
   }
-  if (ldlt_.info() != Eigen::Success) return false;
-  const Vec D = ldlt_.vectorD();
+  if (backendInfo() != Eigen::Success) return false;
+  const Vec D = backendVectorD();
   const Scalar minAbsD = D.size() > 0 ? D.array().abs().minCoeff() : Scalar(1.0);
   return std::isfinite(minAbsD) && minAbsD > dynamic_reg_eps_;
 }
@@ -209,7 +261,7 @@ bool KktSystem::escalateAndResolve(const Vec& rhs, Vec& x_out) {
   // just past dynamic_reg_eps_, which is far too slow to close a spread of
   // several orders of magnitude within a handful of attempts -- so here we
   // grow far more aggressively (x1000/attempt) and use the one signal that
-  // actually reflects whether it worked: does ldlt_.solve(rhs) come back
+  // actually reflects whether it worked: does backendSolve(rhs) come back
   // finite, not just whether some abstract pivot-magnitude heuristic passed.
   constexpr int kMaxEscalations = 10;
   Scalar extra_p = last_extra_p_, extra_a = last_extra_a_;
@@ -217,7 +269,7 @@ bool KktSystem::escalateAndResolve(const Vec& rhs, Vec& x_out) {
     extra_p = std::max(extra_p * 1000.0, dynamic_reg_delta_);
     extra_a = std::max(extra_a * 1000.0, dynamic_reg_delta_);
     if (!tryFactorizeWithBump(extra_p, extra_a)) continue;
-    x_out = ldlt_.solve(rhs);
+    x_out = backendSolve(rhs);
     if (x_out.allFinite()) {
       last_extra_p_ = extra_p;
       last_extra_a_ = extra_a;
@@ -228,7 +280,7 @@ bool KktSystem::escalateAndResolve(const Vec& rhs, Vec& x_out) {
 }
 
 Scalar KktSystem::solve(const Vec& rhs, Vec& x_out) {
-  x_out = ldlt_.solve(rhs);
+  x_out = backendSolve(rhs);
   if (!x_out.allFinite()) escalateAndResolve(rhs, x_out);
 
   const Scalar rhsNorm = std::max(rhs.norm(), Scalar(1e-30));
@@ -236,7 +288,7 @@ Scalar KktSystem::solve(const Vec& rhs, Vec& x_out) {
   Scalar relRes = r.norm() / rhsNorm;
 
   for (int it = 0; it < refine_max_iter_ && relRes > refine_tol_; ++it) {
-    Vec dx = ldlt_.solve(r);
+    Vec dx = backendSolve(r);
     x_out += dx;
     r = rhs - K_.selfadjointView<Eigen::Lower>() * x_out;
     relRes = r.norm() / rhsNorm;
