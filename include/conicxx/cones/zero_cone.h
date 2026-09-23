@@ -31,6 +31,10 @@ class ZeroCone final : public ConeBase {
   Index numHsEntries() const override { return dim_; }
   void writeHsLowerTriangle(Eigen::Ref<Vec> out) const override { out.setZero(); }
 
+  Scalar minSquaredEigenvalue(const Eigen::Ref<const Vec>&) const override {
+    return std::numeric_limits<Scalar>::infinity();
+  }
+
   Scalar margin(const Eigen::Ref<const Vec>& x) const override {
     (void)x;
     return std::numeric_limits<Scalar>::infinity();

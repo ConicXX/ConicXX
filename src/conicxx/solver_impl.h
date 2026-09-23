@@ -46,6 +46,15 @@ class SolverImpl {
   bool computeAffineStep();
   bool computeCombinedStep(Scalar sigma, Scalar mu);
   Scalar computeStepLength(const Vec& ds, const Vec& dz, Scalar dtau, Scalar dkappa) const;
+
+  /// Backtracks alpha down from alpha_max (using ds_/dz_/dtau_/dkappa_, the combined step
+  /// currently in the step-direction members) until the trial (s,z,tau,kappa) is strictly
+  /// interior AND passes the centrality safeguard (Settings::centrality_theta, evaluated via
+  /// lambda = W * z_trial against that same trial point's own mu), or backtracking is exhausted.
+  /// T3.2 (CONICXX_AGENT_TASKS.md Phase 3): replaces the old clamp-inside-the-cone-math approach
+  /// with an explicit safeguard at the one place a bad step actually gets taken.
+  Scalar safeguardedStepLength(Scalar alpha_max) const;
+
   void addStep(Scalar alpha);
   void maybeRescale();
 
@@ -87,6 +96,9 @@ class SolverImpl {
   // --- warm start ---
   bool have_warm_start_ = false;
   Vec warm_x_, warm_s_, warm_z_;
+
+  // --- step-length safeguard state (T3.2) ---
+  int consecutive_tiny_steps_ = 0;  ///< reset in solve(); see Status::InsufficientProgress
 
   Solution solution_;
 };

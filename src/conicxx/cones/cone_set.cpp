@@ -86,6 +86,15 @@ std::pair<Scalar, Scalar> ConeSet::margins(const Vec& x) const {
   return {min_margin, pos_margin_sum};
 }
 
+Scalar ConeSet::minCentrality(const Vec& lambda) const {
+  Scalar m = std::numeric_limits<Scalar>::infinity();
+  for (size_t i = 0; i < cones_.size(); ++i) {
+    const Index off = offsets_[i], d = cones_[i]->dim();
+    m = std::min(m, cones_[i]->minSquaredEigenvalue(lambda.segment(off, d)));
+  }
+  return m;
+}
+
 void ConeSet::scaledUnitShift(Eigen::Ref<Vec> x, Scalar alpha) const {
   for (size_t i = 0; i < cones_.size(); ++i) {
     const Index off = offsets_[i], d = cones_[i]->dim();

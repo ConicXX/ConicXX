@@ -40,6 +40,10 @@ class ConeSet {
   /// Aggregate (min_margin, sum of positive margins) over all blocks.
   std::pair<Scalar, Scalar> margins(const Vec& x) const;
 
+  /// Minimum over all blocks of minSquaredEigenvalue(lambda restricted to that block) -- the
+  /// step-length centrality safeguard's aggregate check (see Settings::centrality_theta).
+  Scalar minCentrality(const Vec& lambda) const;
+
   void scaledUnitShift(Eigen::Ref<Vec> x, Scalar alpha) const;
 
   /// Force the primal-slack segments belonging to Zero-cone blocks to

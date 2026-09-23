@@ -28,6 +28,10 @@ class NonnegativeCone final : public ConeBase {
   Index numHsEntries() const override { return dim_; }
   void writeHsLowerTriangle(Eigen::Ref<Vec> out) const override;
 
+  Scalar minSquaredEigenvalue(const Eigen::Ref<const Vec>& lambda) const override {
+    return lambda.array().square().minCoeff();
+  }
+
   Scalar margin(const Eigen::Ref<const Vec>& x) const override { return x.minCoeff(); }
 
   void scaledUnitShift(Eigen::Ref<Vec> x, Scalar alpha) const override;

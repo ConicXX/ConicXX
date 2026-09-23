@@ -74,4 +74,14 @@ BenchProblem makeFrictionChain(Index num_contacts, Scalar mu, std::mt19937& rng)
 /// be driven arbitrarily large by increasing num_contacts.
 BenchProblem makeFrictionChainXL(Index num_contacts, Scalar mu, std::mt19937& rng);
 
+/// Phase 3 (CONICXX_AGENT_TASKS.md) accept criterion: num_contacts 3D Coulomb friction cones,
+/// half "apex" (minimizing normal force alone with no other constraint, so the *known* optimum
+/// is exactly the cone's apex, fn = ft = 0 -- a genuinely degenerate solution, not just a random
+/// instance that happens to land near one) and half "sticking" (normal and tangential force
+/// pinned by equality constraints to a fixed point strictly inside the friction cone, never
+/// binding). Exercises the closed-form NT scaling (T3.1) and step-length safeguard (T3.2)
+/// exactly at the case they were built for: some cone blocks driven all the way to the
+/// non-smooth apex, solved in the same KKT system as blocks that are comfortably interior.
+BenchProblem makeApexContacts(Index num_contacts, Scalar mu, std::mt19937& rng);
+
 }  // namespace conicxx::bench

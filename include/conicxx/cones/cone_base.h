@@ -76,6 +76,14 @@ class ConeBase {
   /// KKT (2,2) block's sign and regularization uniformly across cone types.
   virtual void writeHsLowerTriangle(Eigen::Ref<Vec> out) const = 0;
 
+  /// Minimum eigenvalue of the Jordan square lambda o lambda, for the step-length centrality
+  /// safeguard (see Settings::centrality_theta): +infinity for the Zero cone (never binds);
+  /// min_i(lambda_i^2) for Nonnegative; (lambda0 - ||lambda1||)^2 for SecondOrder (the smaller of
+  /// that cone's two Jordan eigenvalues (lambda0 +/- ||lambda1||)^2 -- always the "minus" one
+  /// since lambda0, ||lambda1|| >= 0 for a lambda actually produced by applyW() on an
+  /// interior-ish z).
+  virtual Scalar minSquaredEigenvalue(const Eigen::Ref<const Vec>& lambda) const = 0;
+
   /// Distance-to-boundary style measure of x within this cone; used to build
   /// a strictly-interior starting point. +infinity for the Zero cone (always
   /// "interior", never binding in an aggregate min-margin computation).

@@ -151,3 +151,53 @@ TEST(SecondOrderCone, MaxStepTangentialPush) {
   // x + alpha*dx = (1, alpha, 0); leaves cone once alpha > 1.
   EXPECT_NEAR(cone.maxStep(x, dx, 10.0), 1.0, 1e-12);
 }
+
+// T3.3 (CONICXX_AGENT_TASKS.md Phase 3): edge cases for the analytic quadratic-root step,
+// verified against a standalone reimplementation of the same formula before being hardcoded here.
+
+TEST(SecondOrderCone, MaxStepTangentToBoundaryTouchesAtApex) {
+  // A direction whose quadratic has a double root (touches the boundary at exactly one point,
+  // does not cross it) -- here the touching point happens to be the apex itself, a valid and
+  // still-degenerate case of "tangent to the boundary".
+  SecondOrderCone cone(3);
+  Vec x(3);
+  x << 2.0, 1.0, 0.0;  // interior: 2 > 1
+  Vec dx(3);
+  dx << -1.0, -0.5, 0.0;
+  EXPECT_NEAR(cone.maxStep(x, dx, 10.0), 2.0, 1e-10);
+}
+
+TEST(SecondOrderCone, MaxStepAtApexMovingInward) {
+  // x is exactly the apex (the single point where the boundary is not smooth); dx points
+  // straight along the axis into the strict interior with no other future boundary crossing --
+  // the largest safe step is unconstrained by the cone (alpha_max itself).
+  SecondOrderCone cone(3);
+  Vec x = Vec::Zero(3);
+  Vec dx(3);
+  dx << 1.0, 0.0, 0.0;
+  EXPECT_NEAR(cone.maxStep(x, dx, 5.0), 5.0, 1e-12);
+}
+
+TEST(SecondOrderCone, MaxStepNegatedDirectionHitsApexAtOne) {
+  // dx = -x: the trajectory x*(1-alpha) reaches exactly the apex at alpha = 1 and would leave
+  // the cone (flip to the opposite ray) beyond it.
+  SecondOrderCone cone(3);
+  Vec x(3);
+  x << 2.0, 1.0, 0.5;
+  Vec dx = -x;
+  EXPECT_NEAR(cone.maxStep(x, dx, 10.0), 1.0, 1e-10);
+}
+
+TEST(SecondOrderCone, MaxStepScaleInvariant) {
+  // maxStep's quadratic is homogeneous in (x, dx) jointly, so scaling both by the same factor
+  // must not change the returned alpha -- exercised at 1e8 and 1e-8 to catch any accidental loss
+  // of precision (overflow/underflow) in the degeneracy-threshold comparisons.
+  SecondOrderCone cone(3);
+  for (Scalar k : {1e8, 1e-8}) {
+    Vec x(3);
+    x << 1.0 * k, 0.0, 0.0;
+    Vec dx(3);
+    dx << -1.0 * k, 0.0, 0.0;
+    EXPECT_NEAR(cone.maxStep(x, dx, 10.0), 1.0, 1e-9) << "scale=" << k;
+  }
+}

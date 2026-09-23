@@ -404,4 +404,65 @@ BenchProblem makeFrictionChainXL(Index num_contacts, Scalar mu, std::mt19937& rn
   return prob;
 }
 
+BenchProblem makeApexContacts(Index num_contacts, Scalar mu, std::mt19937& rng) {
+  BenchProblem prob;
+  prob.family = "ApexContacts";
+  prob.size_label = "contacts=" + std::to_string(num_contacts);
+
+  const Index num_apex = num_contacts / 2;
+  const Index num_sticking = num_contacts - num_apex;
+  const Index nx = 3 * num_contacts;
+  const Index m = 3 * num_sticking + 3 * num_contacts;
+
+  prob.P = SparseMat(nx, nx);  // P = 0: pure conic LP, no quadratic term needed.
+  prob.q = Vec::Zero(nx);
+  // Minimizing the normal force alone, with nothing else pulling on this contact's tangential
+  // components and no other constraint, drives it exactly to (fn, ft) = (0, 0) -- the apex --
+  // at the optimum, not just near it.
+  for (Index c = 0; c < num_apex; ++c) prob.q[3 * c] = 1.0;
+
+  prob.b = Vec::Zero(m);
+  std::vector<Triplet> a_triplets;
+  Index row = 0;
+
+  // Zero cone: pin each sticking contact's (fn, ft1, ft2) to a fixed point strictly inside its
+  // own friction cone (fn > 0, ||ft|| < mu*fn strictly) -- never binding, so this block stays
+  // comfortably interior for the whole solve, exercised in the same KKT system as the apex
+  // blocks below.
+  for (Index c = num_apex; c < num_contacts; ++c) {
+    const Scalar fn = randomUniform(1, rng, 8.0, 12.0)[0];
+    Vec dir = randomUniform(2, rng, -1.0, 1.0);
+    const Scalar dir_norm = dir.norm();
+    if (dir_norm > 1e-12) dir /= dir_norm;
+    const Scalar frac = randomUniform(1, rng, 0.3, 0.7)[0];  // strictly < 1: strictly interior
+    const Vec ft = dir * (frac * mu * fn);
+
+    a_triplets.emplace_back(row, 3 * c, 1.0);
+    prob.b[row] = fn;
+    ++row;
+    a_triplets.emplace_back(row, 3 * c + 1, 1.0);
+    prob.b[row] = ft[0];
+    ++row;
+    a_triplets.emplace_back(row, 3 * c + 2, 1.0);
+    prob.b[row] = ft[1];
+    ++row;
+  }
+  prob.cone_spec.zero_dim = row;
+
+  // SOC (Coulomb friction cone) rows for every contact, apex and sticking alike: mu*fn >= ||ft||.
+  for (Index c = 0; c < num_contacts; ++c) {
+    a_triplets.emplace_back(row, 3 * c, -mu);
+    ++row;
+    a_triplets.emplace_back(row, 3 * c + 1, -1.0);
+    ++row;
+    a_triplets.emplace_back(row, 3 * c + 2, -1.0);
+    ++row;
+    prob.cone_spec.soc_dims.push_back(3);
+  }
+
+  prob.A = SparseMat(row, nx);
+  prob.A.setFromTriplets(a_triplets.begin(), a_triplets.end());
+  return prob;
+}
+
 }  // namespace conicxx::bench

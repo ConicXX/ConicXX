@@ -78,6 +78,22 @@ struct Settings {
   // --- Step length ---
   Scalar max_step_fraction = 0.99;  ///< fraction-to-boundary safety factor
 
+  /// Centrality safeguard (Phase 3, T3.2): after a trial step, every cone block's
+  /// min-eigenvalue(lambda o lambda) must be >= centrality_theta * mu (mu from *before* the
+  /// step), or the step backtracks. lambda = W*z_trial, using the current iteration's already-
+  /// computed NT scaling W. Catches steps that stay strictly interior (per cone.margin()) but
+  /// land too close to the boundary to trust -- e.g. heading toward a cone's apex faster than mu
+  /// is shrinking.
+  Scalar centrality_theta = 1e-4;
+
+  /// Backtracking factor for the step-length safeguard: alpha *= linesearch_backtrack each time
+  /// a trial step fails the interior or centrality check.
+  Scalar linesearch_backtrack = 0.8;
+
+  /// If the safeguarded step length falls below this for two consecutive iterations, solve()
+  /// returns Status::InsufficientProgress instead of continuing -- see the Status enum.
+  Scalar min_terminate_step_length = 1e-4;
+
   // --- Equilibration (Ruiz scaling) ---
   bool equilibrate = true;
   int equilibrate_max_iter = 10;

@@ -117,9 +117,23 @@ void SolverImpl::shiftToInteriorCold(Eigen::Ref<Vec> v) const {
 
 void SolverImpl::ensureStrictlyInteriorWarm(Eigen::Ref<Vec> v) const {
   const auto [min_margin, pos_margin] = cones_->margins(v);
-  (void)pos_margin;
-  if (min_margin <= 1e-8) {
-    cones_->scaledUnitShift(v, -min_margin + 1e-6);
+  const Scalar deg = static_cast<Scalar>(std::max(cones_->degree(), Index(1)));
+  // A meaningful interior margin, scaled to this vector's own typical magnitude
+  // (pos_margin/deg), not a fixed tiny epsilon: a warm start reused across substantially
+  // different problem data (see test_update_reuse.cpp) can otherwise end up "interior" by a
+  // margin far too small relative to mu for the step-length centrality safeguard (Settings::
+  // centrality_theta, Phase 3/T3.2) to ever accept a step -- that safeguard checks against
+  // theta*mu, not an absolute constant, so an absolute-epsilon margin is exactly the kind of
+  // inconsistency it's designed to catch. Uses a much smaller fraction than
+  // shiftToInteriorCold's 0.1 (only 0.01) since warm start should stay close to the previous
+  // point, not reset it as bluntly as a cold start does. Proper mu-targeted recentering (T5.2)
+  // is Phase 5's job; this is the minimal fix that keeps warm start usable in the meantime.
+  const Scalar target = std::max(Scalar(1e-2), Scalar(0.01) * pos_margin / deg);
+  if (min_margin <= 0.0) {
+    cones_->scaledUnitShift(v, -min_margin);
+    cones_->scaledUnitShift(v, target);
+  } else if (min_margin < target) {
+    cones_->scaledUnitShift(v, target - min_margin);
   }
 }
 
@@ -295,6 +309,48 @@ Scalar SolverImpl::computeStepLength(const Vec& ds, const Vec& dz, Scalar dtau,
   return alpha;
 }
 
+Scalar SolverImpl::safeguardedStepLength(Scalar alpha_max) const {
+  Scalar alpha = alpha_max;
+  Vec s_trial(m_), z_trial(m_), lambda_trial(m_);
+  const Scalar deg1 = static_cast<Scalar>(cones_->degree() + 1);
+  // 0.8^64 ~ 6e-7, well past min_terminate_step_length's default (1e-4) for any reasonable
+  // linesearch_backtrack -- this loop always terminates via the caller's tiny-step check, not by
+  // exhausting attempts on a problem that could still make progress with a smaller backtrack.
+  constexpr int kMaxBacktracks = 64;
+  for (int attempt = 0; attempt < kMaxBacktracks; ++attempt) {
+    const Scalar tau_trial = tau_ + alpha * dtau_;
+    const Scalar kappa_trial = kappa_ + alpha * dkappa_;
+    if (tau_trial > 0.0 && kappa_trial > 0.0) {
+      s_trial = s_ + alpha * ds_;
+      z_trial = z_ + alpha * dz_;
+      const auto [min_margin_s, pos_s] = cones_->margins(s_trial);
+      const auto [min_margin_z, pos_z] = cones_->margins(z_trial);
+      (void)pos_s;
+      (void)pos_z;
+      if (min_margin_s > 0.0 && min_margin_z > 0.0) {
+        // Checked against mu_trial (this trial point's own mu), not the pre-step mu: a full,
+        // legitimate Mehrotra step is *expected* to shrink mu substantially (that's the point of
+        // taking it), so checking the resulting lambda's centrality against the old, much larger
+        // mu would reject perfectly good aggressive steps, not just genuinely bad ones -- this is
+        // the standard "neighborhood of the central path" formulation (N_-infinity(gamma) and
+        // similar), where membership is always evaluated at the same point as the mu it's
+        // compared against, not a stale one.
+        const Scalar mu_trial = (s_trial.dot(z_trial) + tau_trial * kappa_trial) / deg1;
+        // lambda = W * z_trial, using this iteration's already-computed NT scaling (from
+        // refactorizeForCurrentScaling()'s updateScaling() call) -- cheap, and a good enough
+        // proxy for the trial point's centrality without recomputing a fresh NT scaling for
+        // every backtrack attempt.
+        cones_->applyW(z_trial, lambda_trial);
+        if (cones_->minCentrality(lambda_trial) >= settings_.centrality_theta * mu_trial) {
+          return alpha;
+        }
+      }
+    }
+    alpha *= settings_.linesearch_backtrack;
+  }
+  return alpha;
+}
+
 void SolverImpl::addStep(Scalar alpha) {
   x_ += alpha * dx_;
   s_ += alpha * ds_;
@@ -368,6 +424,7 @@ void SolverImpl::finalizeSolution(bool /*converged*/) {
 
 const Solution& SolverImpl::solve() {
   solution_ = Solution{};
+  consecutive_tiny_steps_ = 0;
   if (!setup_done_) {
     solution_.status = Status::NumericalError;
     return solution_;
@@ -442,11 +499,26 @@ const Solution& SolverImpl::solve() {
       break;
     }
 
-    const Scalar alpha =
+    const Scalar alpha_max =
         computeStepLength(ds_, dz_, dtau_, dkappa_) * settings_.max_step_fraction;
+    if (!std::isfinite(alpha_max) || alpha_max <= 0.0) {
+      final_status = Status::NumericalError;
+      break;
+    }
+    const Scalar alpha = safeguardedStepLength(alpha_max);
     if (!std::isfinite(alpha) || alpha <= 0.0) {
       final_status = Status::NumericalError;
       break;
+    }
+
+    if (alpha < settings_.min_terminate_step_length) {
+      if (++consecutive_tiny_steps_ >= 2) {
+        final_status = Status::InsufficientProgress;
+        addStep(alpha);  // still take it -- the best available iterate is better than the last
+        break;
+      }
+    } else {
+      consecutive_tiny_steps_ = 0;
     }
 
     addStep(alpha);

@@ -181,6 +181,16 @@ int main() {
       [](Index num_contacts, std::mt19937& rng) { return makeFrictionChainXL(num_contacts, 0.7, rng); },
       all_ok);
 
+  // Phase 3 accept criterion: half the contacts' known optimum is exactly the cone's apex, half
+  // are comfortably-interior "sticking" contacts pinned by equality constraints. Must converge
+  // (checked here) in <=25 iterations (checked explicitly, not just via the family-wide
+  // Status::Solved gate below -- see SolveEqualityRobustness/ApexContacts-style unit tests for
+  // the assertion on iteration count and NaN-freedom this table alone doesn't enforce).
+  runFamily(
+      "ApexContacts", {4, 16, 64}, kTrials,
+      [](Index num_contacts, std::mt19937& rng) { return makeApexContacts(num_contacts, 0.7, rng); },
+      all_ok);
+
   std::printf("\n%s\n", all_ok ? "ALL BENCHMARKS CONVERGED (Status::Solved)."
                                 : "REGRESSION: at least one benchmark instance did not "
                                   "converge -- see **FAILED TO CONVERGE** rows above.");

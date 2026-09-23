@@ -16,6 +16,8 @@ const char* toString(Status status) {
       return "MaxIterations";
     case Status::NumericalError:
       return "NumericalError";
+    case Status::InsufficientProgress:
+      return "InsufficientProgress";
   }
   return "Unknown";
 }

@@ -312,6 +312,52 @@ H   = W² = η² (2 w wᵀ − J)
   ≤ 25 iterations, with no NaNs.
 - Benchmarks converge. Report the iteration-count diff.
 
+**Done.** `SecondOrderCone` rewritten to the closed-form (η, w) arrowhead NT scaling (T3.1) --
+`applyW`/`applyWInv` are now O(dim) rank-1 formulas, no dense `W`/`Hs` stored, no `PartialPivLU`.
+Before trusting the literal task formula, verified numerically against the previously-used
+Householder form (to ~1e-15) precisely *because* an earlier session's docstring warned that "a
+more literal reading of the arrowhead formula" had been tried and found subtly wrong (~1% error)
+-- confirmed that earlier attempt used a different, non-matching normalization of `w`, and the
+formula as written in this task file is correct.
+
+All clamps/floors/identity-fallback removed from `updateScaling()` (T3.2); replaced with an
+explicit solver-level safeguard (`SolverImpl::safeguardedStepLength()`): after the combined step,
+backtrack (`Settings::linesearch_backtrack`, default 0.8) until the trial point is strictly
+interior *and* passes a centrality check (`Settings::centrality_theta`, default 1e-4) --
+`min_eig(λ∘λ) ≥ θ·μ`, checked against **that trial point's own μ**, not the pre-step μ (checking
+against the old, pre-step μ was tried first and caused a large, systematic iteration-count
+regression across the whole benchmark suite: a legitimate, aggressive Mehrotra step that shrinks
+μ a lot was being rejected just for succeeding at that, not for being genuinely bad -- this is the
+standard "neighborhood of the central path" formulation, where membership is always evaluated at
+the same point as the μ it's compared against). Two consecutive steps below
+`min_terminate_step_length` (1e-4) return the new `Status::InsufficientProgress` with the current
+iterate (full best-iterate tracking across the run is Phase 4/T4.3's job, not implemented here).
+
+One real, unrelated regression found and fixed along the way: the new centrality safeguard
+correctly rejected `test_update_reuse.cpp`'s warm-started re-solve, because
+`ensureStrictlyInteriorWarm()` only ever nudged the margin to a fixed absolute epsilon (~1e-6)
+with no relation to μ -- fine under the old, unsafeguarded stepping, but exactly the kind of
+inconsistency this phase's stricter check is designed to catch. Gave it a μ-scaled target margin
+instead (still far short of full T5.2 recentering, which is Phase 5's job) as the minimal fix to
+keep warm start usable in the meantime.
+
+T3.3: kept the existing analytic quadratic-root `maxStep()` unchanged; added the four requested
+edge-case tests (tangent-to-boundary — touches at the apex, verified against a standalone
+reimplementation of the formula; apex-with-inward-direction; `dx = -x`; 1e±8 scale invariance).
+`dim == 3` fixed-size specialization (also mentioned in T3.1) was **not** done — left as a
+Phase 7 (alloc-free hot path) concern rather than folding a performance-only change into this
+phase.
+
+New `ApexContacts` benchmark family (`benchmarks/problem_generators.cpp`) plus a dedicated unit
+test (`test/solver/test_solve_apex_contacts.cpp`) asserting the accept criterion's exact numbers
+(≤25 iterations, no NaNs, solution actually at the apex for the apex contacts) -- the benchmark
+table alone only tracks iteration counts for regressions, it doesn't assert a hard cap.
+
+Verified: all 79 tests pass, clean under `-fsanitize=address,undefined` (tests + full benchmark
+binary incl. the new `ApexContacts` family). Benchmark suite iteration counts are unchanged from
+the Phase 2 baseline (`ApexContacts` itself converges in 6 iterations at every size tested, well
+under the 25-iteration cap).
+
 ---
 
 ## Phase 4 — Termination, infeasibility, statuses

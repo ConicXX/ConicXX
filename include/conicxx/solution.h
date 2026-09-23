@@ -13,6 +13,13 @@ enum class Status {
   DualInfeasible,
   MaxIterations,
   NumericalError,
+  /// The step-length safeguard (see Settings::centrality_theta/min_terminate_step_length)
+  /// backtracked to a step below min_terminate_step_length for two consecutive iterations --
+  /// returned instead of continuing to grind on iterations that aren't making real progress, or
+  /// silently accepting a step too close to the boundary to trust. Reports the current iterate
+  /// (full best-iterate tracking across the whole run is Phase 4/T4.3's job, not implemented
+  /// here -- see CONICXX_AGENT_TASKS.md).
+  InsufficientProgress,
 };
 
 const char* toString(Status status);
