@@ -37,7 +37,15 @@ class SolverImpl {
   // --- initialization ---
   bool computeInitialPoint();
   void shiftToInteriorCold(Eigen::Ref<Vec> v) const;
-  void ensureStrictlyInteriorWarm(Eigen::Ref<Vec> v) const;
+
+  /// T5.2: recenters a captured warm start (s, z) in place -- shifts both to a safely-interior
+  /// point (same shiftToInteriorCold() logic the cold start uses; superseded T3-era
+  /// ensureStrictlyInteriorWarm()'s fixed-epsilon margin, which Phase 3's centrality safeguard
+  /// already needed a bigger fix for once), then uniformly rescales (s, z) so that
+  /// mu = (s'z + tau*kappa)/(deg+1) hits Settings::warm_mu0 exactly with tau=1,
+  /// kappa=Settings::warm_mu0. Zero-cone s stays exactly 0 (scaledUnitShift()/scaling are both
+  /// no-ops there); zero-cone z is free and participates in the rescale like any other block.
+  void recenterWarmStart(Eigen::Ref<Vec> s, Eigen::Ref<Vec> z) const;
 
   // --- per-iteration pipeline ---
   bool refactorizeForCurrentScaling();

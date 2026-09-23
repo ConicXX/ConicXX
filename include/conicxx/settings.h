@@ -125,8 +125,14 @@ struct Settings {
   Scalar equilibrate_min_scale = 1e-4;
   Scalar equilibrate_max_scale = 1e4;
 
-  // --- Warm start ---
+  // --- Warm start (Phase 5, T5.1/T5.2) ---
   bool warm_start = true;  ///< reuse previous (x,s,z) to seed the next solve()
+
+  /// Target mu = (s'z + tau*kappa)/(deg+1) for a recentered warm start: after a successful
+  /// solve(), (x/tau, s/tau, z/tau) is captured, shifted to a safely-interior point, and rescaled
+  /// so this mu is hit exactly (tau=1, kappa=warm_mu0) -- an uncentered warm start (raw s'z near
+  /// the previous solve's converged ~0) makes the very first Newton step's linearization poor.
+  Scalar warm_mu0 = 1e-3;
 
   // --- Diagnostics ---
   int verbose = 0;              ///< 0 = silent, 1 = summary, 2 = per-iteration

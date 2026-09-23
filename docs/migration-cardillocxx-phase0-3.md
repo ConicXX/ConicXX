@@ -5,10 +5,10 @@ Written for: the CardilloCxx coding agent that integrates conicxx as a contact-s
 Scope: everything committed to conicxx between commit `784e5cd` ("Possibly found bug in custom
 ldlt decomposition", the last commit CardilloCxx was validated against) and the current `HEAD`
 (Phase 0 hygiene, Phase 1 structured cone scaling, Phase 2 per-cone regularization, Phase 3 SOC
-scaling + step-length safeguard, Phase 4 termination/infeasibility/statuses -- see the addendum at
-the end of this file for Phase 4 specifically, added after the rest of this note was first
-written). See `CONICXX_AGENT_TASKS.md` in this repo for the full task list and per-phase
-rationale/verification if you want more detail than this note gives.
+scaling + step-length safeguard, Phase 4 termination/infeasibility/statuses, Phase 5 warm start --
+see the addenda at the end of this file for Phases 4 and 5 specifically, added after the rest of
+this note was first written). See `CONICXX_AGENT_TASKS.md` in this repo for the full task list
+and per-phase rationale/verification if you want more detail than this note gives.
 
 ## TL;DR
 
@@ -235,3 +235,32 @@ conicxx's own benchmark suite was iteration counts improving on most instances (
 needed now that the check isn't needlessly strict), one isolated instance needing one more
 iteration. Worth knowing if you've tuned anything (e.g. `max_iter`) around the old convergence
 behavior on your own scenes.
+
+---
+
+## Addendum: Phase 5 (warm start)
+
+**No API changes** -- `Solver::setWarmStart()`, `Settings::warm_start`, and the automatic
+"reuse last solve's iterate" behavior your per-timestep loop presumably already relies on are all
+still there with the same names and signatures. One new `Settings` field:
+
+```cpp
+Scalar warm_mu0 = 1e-3;  // target centrality for a recentered warm start -- see below
+```
+
+**This phase is a straight correctness/quality fix to warm-starting itself, worth knowing about
+even though nothing needs to change in your code.** The previous implementation had a real bug:
+after a solve, it captured the raw homogeneous-embedding iterate as the next warm start without
+dividing by `tau` (only correct when `tau` happened to converge to exactly 1, which it generally
+doesn't) and reset `kappa=1` even though a converged `s'z` is typically ~1e-9 -- both together gave
+the *next* solve's first Newton step a badly uncentered starting point. This is now fixed:
+the captured point is normalized correctly, then explicitly recentered (shifted to strictly
+interior, rescaled so its centrality `mu` hits `warm_mu0` exactly) before being used, and compared
+against a fresh cold start every time -- if the recentered warm point isn't actually better, the
+solve falls back to cold automatically. **If CardilloMPI's own timestep loop already relies on
+`Settings::warm_start` (the per-timestep contact-force continuity you're presumably using this
+solver for in the first place), you should see equal-or-fewer iterations per timestep after this
+phase, not more** -- if you see the opposite on a real scene, that's worth reporting back, since
+`test/solver/test_warm_start.cpp`'s own accept-criteria numbers (mean iterations at ≤1%
+per-step perturbation must not exceed cold-start's) only cover a synthetic friction-chain
+sequence, not your actual scene dynamics.

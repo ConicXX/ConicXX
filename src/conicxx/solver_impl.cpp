@@ -153,25 +153,41 @@ void SolverImpl::shiftToInteriorCold(Eigen::Ref<Vec> v) const {
   }
 }
 
-void SolverImpl::ensureStrictlyInteriorWarm(Eigen::Ref<Vec> v) const {
-  const auto [min_margin, pos_margin] = cones_->margins(v);
-  const Scalar deg = static_cast<Scalar>(std::max(cones_->degree(), Index(1)));
-  // A meaningful interior margin, scaled to this vector's own typical magnitude
-  // (pos_margin/deg), not a fixed tiny epsilon: a warm start reused across substantially
-  // different problem data (see test_update_reuse.cpp) can otherwise end up "interior" by a
-  // margin far too small relative to mu for the step-length centrality safeguard (Settings::
-  // centrality_theta, Phase 3/T3.2) to ever accept a step -- that safeguard checks against
-  // theta*mu, not an absolute constant, so an absolute-epsilon margin is exactly the kind of
-  // inconsistency it's designed to catch. Uses a much smaller fraction than
-  // shiftToInteriorCold's 0.1 (only 0.01) since warm start should stay close to the previous
-  // point, not reset it as bluntly as a cold start does. Proper mu-targeted recentering (T5.2)
-  // is Phase 5's job; this is the minimal fix that keeps warm start usable in the meantime.
-  const Scalar target = std::max(Scalar(1e-2), Scalar(0.01) * pos_margin / deg);
-  if (min_margin <= 0.0) {
-    cones_->scaledUnitShift(v, -min_margin);
-    cones_->scaledUnitShift(v, target);
-  } else if (min_margin < target) {
-    cones_->scaledUnitShift(v, target - min_margin);
+void SolverImpl::recenterWarmStart(Eigen::Ref<Vec> s, Eigen::Ref<Vec> z) const {
+  // Step 1: the smallest shift making both strictly interior, scaled to each vector's own
+  // typical magnitude (pos_margin/deg) with a small coefficient -- deliberately *not*
+  // shiftToInteriorCold()'s bigger target (coefficient 0.1, absolute floor 1.0): a warm point is
+  // presumably already close to a good solution, so a shift sized for "no better information to
+  // start from" measurably hurt it in practice (caught by test_warm_start.cpp: it made warm
+  // starts need *more* iterations than cold on average for small perturbations, the opposite of
+  // the point of warm-starting). Small enough to preserve the warm point's structure, but not a
+  // fixed absolute epsilon either -- Phase 3 hit real trouble from exactly that (see
+  // test_update_reuse.cpp), since the step-length centrality safeguard checks margin against
+  // theta*mu, not an absolute constant.
+  const auto shiftMinimal = [this](Eigen::Ref<Vec> v) {
+    const auto [min_margin, pos_margin] = cones_->margins(v);
+    const Scalar deg = static_cast<Scalar>(std::max(cones_->degree(), Index(1)));
+    const Scalar target = std::max(Scalar(1e-2), Scalar(0.01) * pos_margin / deg);
+    if (min_margin <= 0.0) {
+      cones_->scaledUnitShift(v, -min_margin);
+      cones_->scaledUnitShift(v, target);
+    } else if (min_margin < target) {
+      cones_->scaledUnitShift(v, target - min_margin);
+    }
+  };
+  shiftMinimal(s);
+  shiftMinimal(z);
+
+  // Step 2: rescale (s, z) uniformly by rho so that, with tau=1 and kappa=warm_mu0 fixed,
+  // mu = (s'z + kappa)/(deg+1) hits warm_mu0 exactly. Solving for rho:
+  //   (rho^2 * s'z_current + warm_mu0) / (deg+1) = warm_mu0
+  //   rho = sqrt(warm_mu0 * deg / s'z_current)
+  const Scalar deg = static_cast<Scalar>(cones_->degree());
+  const Scalar sz = s.dot(z);
+  if (deg > 0.0 && sz > 0.0 && std::isfinite(sz)) {
+    const Scalar rho = std::sqrt(settings_.warm_mu0 * deg / sz);
+    s *= rho;
+    z *= rho;
   }
 }
 
@@ -540,14 +556,41 @@ const Solution& SolverImpl::solve() {
 
   const bool use_warm = settings_.warm_start && have_warm_start_;
   if (use_warm) {
-    x_ = warm_x_;
-    s_ = warm_s_;
-    z_ = warm_z_;
-    tau_ = 1.0;
-    kappa_ = 1.0;
-    cones_->zeroPrimalZeroConeBlocks(s_);
-    ensureStrictlyInteriorWarm(s_);
-    ensureStrictlyInteriorWarm(z_);
+    // T5.2: recenter the captured warm point (shift to strictly interior, rescale to hit
+    // warm_mu0), then compare its residuals against a fresh cold start and keep whichever is
+    // better -- an uncentered warm start, or one carried over from a since-substantially-changed
+    // problem, should never end up worse than just starting cold.
+    Vec x_w = warm_x_, s_w = warm_s_, z_w = warm_z_;
+    cones_->zeroPrimalZeroConeBlocks(s_w);
+    recenterWarmStart(s_w, z_w);
+    const Scalar tau_w = 1.0, kappa_w = settings_.warm_mu0;
+
+    x_ = x_w;
+    s_ = s_w;
+    z_ = z_w;
+    tau_ = tau_w;
+    kappa_ = kappa_w;
+    computeResiduals();
+    const Scalar warm_merit = computeMetrics().merit;
+
+    if (!computeInitialPoint()) {
+      solution_.status = Status::NumericalError;
+      solution_.info.iterations = 0;
+      computeResiduals();
+      finalizeSolution(Status::NumericalError, computeMetrics(), computeMu());
+      return solution_;
+    }
+    computeResiduals();
+    const Scalar cold_merit = computeMetrics().merit;
+
+    if (warm_merit <= cold_merit) {
+      x_ = x_w;
+      s_ = s_w;
+      z_ = z_w;
+      tau_ = tau_w;
+      kappa_ = kappa_w;
+    }
+    // else: keep the cold-start point computeInitialPoint() just left in x_/s_/z_/tau_/kappa_.
   } else if (!computeInitialPoint()) {
     solution_.status = Status::NumericalError;
     solution_.info.iterations = 0;
@@ -694,9 +737,14 @@ const Solution& SolverImpl::solve() {
   finalizeSolution(final_status, final_metrics, final_mu);
 
   if (final_status == Status::Solved && settings_.warm_start) {
-    warm_x_ = x_;
-    warm_s_ = s_;
-    warm_z_ = z_;
+    // T5.1: store x/tau, s/tau, z/tau (still in equilibrated units -- x_/s_/z_/tau_ here are the
+    // raw converged HSDE iterate, finalizeSolution() above only read them into local copies).
+    // Storing x_/s_/z_ directly (the old bug) was only correct when tau_ happened to converge to
+    // exactly 1, which it generally doesn't.
+    const Scalar tau_inv = 1.0 / std::max(tau_, Scalar(1e-30));
+    warm_x_ = x_ * tau_inv;
+    warm_s_ = s_ * tau_inv;
+    warm_z_ = z_ * tau_inv;
     have_warm_start_ = true;
   }
 

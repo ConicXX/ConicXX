@@ -451,6 +451,34 @@ sᵀz ≈ 1e-9, which gives a badly uncentered start.
 0.1–5% per "timestep" over 50 steps. Report cold and warm iterations per step.
 *Accept:* warm ≤ cold on average for perturbations ≤ 1%, and never more than cold + 2.
 
+**Done.** T5.1: the end-of-solve warm-start capture now stores `x/τ, s/τ, z/τ` (previously stored
+raw `x_`/`s_`/`z_` unconditionally, correct only when τ happened to converge to exactly 1, which
+it generally doesn't). T5.2: `SolverImpl::recenterWarmStart()` shifts the captured point to a
+strictly-interior one, then rescales `(s, z)` uniformly so `μ = (s'z + τκ)/(deg+1)` hits
+`Settings::warm_mu0` (default 1e-3) exactly with `τ=1, κ=warm_mu0`; the warm candidate's residual
+merit (T4.3's `merit` function) is compared against a freshly-computed cold start and the better
+one is kept.
+
+One real tuning miss found via T5.3's own test (not by inspection): the interior-shift step
+initially reused `shiftToInteriorCold()`'s target (coefficient 0.1, absolute floor 1.0) verbatim,
+on the reasoning that it's the same "meaningful margin, not a fixed epsilon" property Phase 3
+needed for `ensureStrictlyInteriorWarm`. Empirically this made warm starts need *more* iterations
+than cold on average (6.0 vs 5.64 on the T5.3 sequence) -- a shift sized for "no information to
+start from" is too aggressive for a point that's presumably already close to a good solution, and
+was distorting it back toward an uninformed start. Fixed by reusing the smaller, Phase-3-era
+`ensureStrictlyInteriorWarm` target (coefficient 0.01, floor 1e-2) instead -- confirms that
+function's earlier calibration was doing real work and shouldn't have been discarded just because
+T5.2 formally supersedes it.
+
+New tests (`test/solver/test_warm_start.cpp`): a self-contained FrictionChain-style 50-step
+sequence generator (T5.3), asserting both accept-criteria numbers directly (mean warm ≤ mean cold
+at ≤1% perturbation; warm ≤ cold+2 on every single step) plus a looser 5%-perturbation sequence
+confirming warm start never actively hurts even when it doesn't help.
+
+Verified: all 84 tests pass, clean under `-fsanitize=address,undefined` (tests + full benchmark
+binary). Existing benchmark suite unchanged (none of those instances exercise `Settings::
+warm_start`, so this phase couldn't have regressed them either way).
+
 ---
 
 ## Phase 6 — Clarabel-compatible API
