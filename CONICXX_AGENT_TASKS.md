@@ -483,6 +483,12 @@ warm_start`, so this phase couldn't have regressed them either way).
 
 ## Phase 6 — Clarabel-compatible API
 
+**Skipped, by maintainer decision (2026-09-23).** This phase is entirely API-surface work
+(accepting cones in any order, a `clarabel_compat.h` adapter class, mapping Clarabel's settings
+names onto conicxx's) -- none of it changes solving behavior, algorithmic choices, or robustness,
+which is what the maintainer is actually interested in. Left unimplemented; revisit only if a real
+need to drop conicxx into existing Clarabel-shaped call sites shows up.
+
 **T6.1 Arbitrary cone order.** Accept `std::vector<ConeT>` with
 `ConeT = std::variant<ZeroConeT{dim}, NonnegativeConeT{dim}, SecondOrderConeT{dim}>` in any order.
 Internally permute the rows of A and b into Zero → Nonneg → SOC order, and un-permute s and z on
