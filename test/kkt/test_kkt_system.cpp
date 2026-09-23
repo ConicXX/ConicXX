@@ -13,17 +13,20 @@ using namespace conicxx::detail;
 namespace {
 
 // Builds the dense symmetric reference KKT matrix
-//   [ P + regP*I     A'          ]
-//   [ A              -Hs - regA*I]
-// independently of KktSystem, for use as a ground-truth cross-check.
-Mat denseReferenceK(const Mat& P, const Mat& A, const Mat& Hs, Scalar regP, Scalar regA) {
+//   [ P     A' ]
+//   [ A    -Hs ]
+// independently of KktSystem, for use as a ground-truth cross-check. No regularization: since
+// Phase 2 (see KktSystem's K_exact_/K_fact_ split), solve()'s iterative refinement targets the
+// exact, unregularized system -- static/dynamic regularization is purely an internal
+// preconditioner for factorizing K_fact_, fully compensated by refinement against K_exact_.
+Mat denseReferenceK(const Mat& P, const Mat& A, const Mat& Hs) {
   const Index n = static_cast<Index>(P.rows());
   const Index m = static_cast<Index>(A.rows());
   Mat K = Mat::Zero(n + m, n + m);
-  K.topLeftCorner(n, n) = P + regP * Mat::Identity(n, n);
+  K.topLeftCorner(n, n) = P;
   K.topRightCorner(n, m) = A.transpose();
   K.bottomLeftCorner(m, n) = A;
-  K.bottomRightCorner(m, m) = -Hs - regA * Mat::Identity(m, m);
+  K.bottomRightCorner(m, m) = -Hs;
   return K;
 }
 
@@ -47,7 +50,7 @@ TEST(KktSystem, SetupAndSolveMatchesDenseReference) {
   Mat A_dense(2, 2);
   A_dense << 1, 0, 0, 1;
   Mat Hs = Mat::Identity(2, 2);  // NonnegativeCone starts at identity scaling
-  Mat Kref = denseReferenceK(P, A_dense, Hs, settings.static_reg_P, settings.static_reg_A);
+  Mat Kref = denseReferenceK(P, A_dense, Hs);
 
   Vec rhs(4);
   rhs << 1.0, 2.0, 3.0, 4.0;
@@ -80,7 +83,7 @@ TEST(KktSystem, UpdateScalingChangesOnlyHsBlock) {
   Mat A_dense = Mat::Identity(2, 2);
   Mat Hs = Mat::Zero(2, 2);
   Hs.diagonal() = (s.array() / z.array()).matrix();  // diag(4, 9)
-  Mat Kref = denseReferenceK(P, A_dense, Hs, settings.static_reg_P, settings.static_reg_A);
+  Mat Kref = denseReferenceK(P, A_dense, Hs);
 
   Vec rhs(4);
   rhs << 1.0, -1.0, 0.5, 2.0;
@@ -154,5 +157,51 @@ TEST(KktSystem, HandlesRankDeficientEqualityBlockViaRegularization) {
   Vec x(4);
   Scalar relres = kkt.solve(rhs, x);
   EXPECT_TRUE(x.allFinite());
-  EXPECT_LT(relres, 1e-6);
+  // Either it actually converged, or KktSystem honestly flagged the block as rank-deficient
+  // (the near-duplicate rows make K_fact_ so ill-conditioned that refinement against the true,
+  // unregularized K_exact_ can legitimately stall well above tolerance) -- what it must never do
+  // is silently report a small residual it didn't actually achieve.
+  EXPECT_TRUE(relres < 1e-6 || kkt.equalityRankDeficient());
+}
+
+TEST(KktSystem, NewtonDirectionSatisfiesLinearizedEqualitiesExactly) {
+  // Phase 2 accept criterion: for a well-posed (non-duplicate) mix of a zero-cone block, an SOC
+  // block, and an orthant block, the zero-cone rows of K get 0 static regularization in both
+  // K_exact_ and (by default, static_zero = 0) K_fact_ -- so the linear equation those rows
+  // encode is exactly A_E * dx = rhs_E, with no -Hs/regularization term at all, regardless of
+  // which block gets dynamically regularized. Verify this directly against a solved KktSystem
+  // Newton system (not just the converged solution, which a full IPM run would separately check
+  // via feasibility) -- a single kkt.solve() call already is one Newton step's KKT solve.
+  SparseMat P_upper = testutil::makeSparse(3, 3, {{0, 0, 1.0}, {1, 1, 1.0}, {2, 2, 1.0}});
+  // Zero cone (2 rows): x0 + x1 = ., x2 = . . Orthant (1 row) and SOC (dim 3) on top, all mixed.
+  SparseMat A = testutil::makeSparse(6, 3,
+                                     {{0, 0, 1.0}, {0, 1, 1.0}, {1, 2, 1.0},   // zero cone rows
+                                      {2, 0, -1.0},                            // orthant row
+                                      {3, 1, -1.0}, {4, 2, -1.0}, {5, 0, -1.0}});  // SOC rows
+
+  Mat A_dense = Mat(A);
+  const Index zero_dim = 2;
+
+  ConeSpec spec;
+  spec.zero_dim = zero_dim;
+  spec.nonneg_dim = 1;
+  spec.soc_dims = {3};
+  ConeSet cones(spec);
+  KktSystem kkt;
+  ASSERT_TRUE(kkt.setup(P_upper, A, cones, Settings{}));
+
+  // An arbitrary rhs, not chosen to be special in any way for the zero-cone rows.
+  Vec rhs(9);
+  rhs << 0.3, -0.7, 1.1, 2.2, -0.4, 0.9, 1.0, -1.0, 0.5;
+  Vec x(9);
+  Scalar relres = kkt.solve(rhs, x);
+  ASSERT_LT(relres, 1e-8);
+  ASSERT_FALSE(kkt.equalityRankDeficient());
+
+  // The linearized equality rows: A_E * dx (top zero_dim rows of A*x, using the primal block of
+  // x, i.e. x.head(3)) must equal rhs's corresponding zero-cone rows to 1e-12 -- not to whatever
+  // tolerance dynamic/static regularization on the *other* blocks happened to need.
+  const Vec Adx_E = A_dense.topRows(zero_dim) * x.head(3);
+  const Vec rhs_E = rhs.segment(3, zero_dim);  // z-block rows [n, n+zero_dim) of rhs
+  testutil::expectVecNear(Adx_E, rhs_E, 1e-12);
 }

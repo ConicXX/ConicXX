@@ -25,6 +25,17 @@ struct Info {
   Scalar mu = 0;
   Scalar setup_time_s = 0;
   Scalar solve_time_s = 0;
+
+  /// Relative residual of the last KKT solve's iterative refinement (against K_exact -- see
+  /// KktSystem), i.e. how well the *unregularized* system was actually solved.
+  Scalar kkt_refinement_residual = 0;
+
+  /// Set when a zero-cone (equality) pivot stayed bad (wrong sign or too small) even after
+  /// KktSystem's one-shot factor-only preconditioner (Settings::regularization.static_zero_factor_only),
+  /// with dynamic_on_zero_rows left at its default (false) -- a signal of redundant/hyperstatic
+  /// equality constraints (rank-deficient A restricted to the zero-cone rows), not corrected or
+  /// perturbed away silently.
+  bool equality_rank_deficient = false;
 };
 
 struct Solution {

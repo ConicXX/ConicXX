@@ -362,6 +362,8 @@ void SolverImpl::finalizeSolution(bool /*converged*/) {
   solution_.info.primal_residual = rz_.norm() / std::max(tau_, Scalar(1e-30));
   solution_.info.dual_residual = rx_.norm() / std::max(tau_, Scalar(1e-30));
   solution_.info.mu = computeMu();
+  solution_.info.kkt_refinement_residual = kkt_.lastRefinementResidual();
+  solution_.info.equality_rank_deficient = kkt_.equalityRankDeficient();
 }
 
 const Solution& SolverImpl::solve() {

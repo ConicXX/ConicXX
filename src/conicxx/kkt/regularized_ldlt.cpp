@@ -48,8 +48,9 @@ static_assert(sizeof(QDLDL_float) == sizeof(Scalar),
              "QDLDL_float must match conicxx::Scalar (build with QDLDL_FLOAT=OFF)");
 }  // namespace
 
-void RegularizedLdlt::analyzePattern(const SparseMat& K_lower, Index nx, Scalar dynamic_reg_eps,
-                                     Scalar dynamic_reg_delta) {
+void RegularizedLdlt::analyzePattern(const SparseMat& K_lower,
+                                     const std::vector<unsigned char>& is_zero_row, Index nx,
+                                     Scalar dynamic_reg_eps, Scalar dynamic_reg_delta) {
   n_ = static_cast<Index>(K_lower.rows());
   dynamic_reg_eps_ = dynamic_reg_eps;
   dynamic_reg_delta_ = dynamic_reg_delta;
@@ -65,11 +66,14 @@ void RegularizedLdlt::analyzePattern(const SparseMat& K_lower, Index nx, Scalar 
   // position k -- verified directly against SparseSelfAdjointView::twistedBy(perm_)'s actual
   // index mapping (permute_symm_to_symm), not assumed from the general permutation-matrix
   // convention, since getting this backwards would silently apply each pivot's regularization
-  // to the wrong sign.
+  // to the wrong sign (or, for correctable_, to the wrong row entirely -- same bug class, see
+  // the class comment's "never correct a zero row" guarantee).
   expected_sign_.assign(static_cast<size_t>(n_), Scalar(1));
+  correctable_.assign(static_cast<size_t>(n_), 1);
   for (Index k = 0; k < n_; ++k) {
     const Index orig = perm_inv.indices()(k);
     expected_sign_[static_cast<size_t>(k)] = (orig < nx) ? Scalar(1) : Scalar(-1);
+    correctable_[static_cast<size_t>(k)] = is_zero_row[static_cast<size_t>(orig)] ? 0 : 1;
   }
 
   A_upper_.resize(n_, n_);
@@ -137,6 +141,16 @@ inline bool regularizePivot(Scalar& Dk, Scalar expected_sign, Scalar eps, Scalar
   }
   return true;
 }
+
+// A zero-cone (equality) pivot is never corrected -- correcting it here, inline and invisible to
+// KktSystem's outer retry loop, would silently perturb an equality constraint, exactly what
+// Phase 2's regularization redesign forbids by default. If it's bad, it's just counted: D[k] (and
+// therefore Dinv[k]) is left at its naturally-computed value, which may itself be non-finite for
+// a genuinely rank-deficient block -- harmless, since info_ reports failure below regardless and
+// KktSystem never consumes a failed factorization's D/solve.
+inline bool pivotIsBad(Scalar Dk, Scalar expected_sign, Scalar eps) {
+  return Dk * expected_sign < eps;
+}
 }  // namespace
 
 void RegularizedLdlt::factorize(const SparseMat& K_lower) {
@@ -173,12 +187,17 @@ void RegularizedLdlt::factorize(const SparseMat& K_lower) {
   }
 
   Index num_regularized = 0;
+  Index num_bad_zero = 0;
 
   // First pivot: column 0 of an upper-triangular CSC matrix has exactly one entry (the
   // diagonal), so Ax[0] is D[0] directly -- no elimination to perform yet.
   D[0] = Ax[0];
-  if (regularizePivot(D[0], expected_sign_[0], dynamic_reg_eps_, dynamic_reg_delta_)) {
-    ++num_regularized;
+  if (correctable_[0]) {
+    if (regularizePivot(D[0], expected_sign_[0], dynamic_reg_eps_, dynamic_reg_delta_)) {
+      ++num_regularized;
+    }
+  } else if (pivotIsBad(D[0], expected_sign_[0], dynamic_reg_eps_)) {
+    ++num_bad_zero;
   }
   Dinv[0] = Scalar(1) / D[0];
 
@@ -235,20 +254,27 @@ void RegularizedLdlt::factorize(const SparseMat& K_lower) {
       yMarkers[cidx] = kUnused;
     }
 
-    if (regularizePivot(D[k], expected_sign_[static_cast<size_t>(k)], dynamic_reg_eps_,
-                        dynamic_reg_delta_)) {
-      ++num_regularized;
+    const size_t uk = static_cast<size_t>(k);
+    if (correctable_[uk]) {
+      if (regularizePivot(D[k], expected_sign_[uk], dynamic_reg_eps_, dynamic_reg_delta_)) {
+        ++num_regularized;
+      }
+    } else if (pivotIsBad(D[k], expected_sign_[uk], dynamic_reg_eps_)) {
+      ++num_bad_zero;
     }
     Dinv[k] = Scalar(1) / D[k];
   }
 
   num_regularized_pivots_ = num_regularized;
-  // Every pivot clears dynamic_reg_eps_ with the correct sign (unlike upstream QDLDL_factor,
-  // which aborts instead), but if too large a fraction needed correcting, don't silently accept
-  // a factorization built from that many independently-doctored pivots -- report failure so
-  // KktSystem's factorizeWithRetry() gets a chance to fall back to its uniform whole-matrix bump
-  // instead, the same backstop the Eigen/QdldlLdlt backends get. See kMaxRegularizedFraction.
-  info_ = (static_cast<Scalar>(num_regularized) > kMaxRegularizedFraction * static_cast<Scalar>(n))
+  num_bad_zero_pivots_ = num_bad_zero;
+  // Every *correctable* pivot clears dynamic_reg_eps_ with the correct sign (unlike upstream
+  // QDLDL_factor, which aborts instead), but if too large a fraction needed correcting, don't
+  // silently accept a factorization built from that many independently-doctored pivots -- report
+  // failure so KktSystem's factorizeWithRetry() gets a chance to fall back to its per-block bump
+  // instead, the same backstop the Eigen/QdldlLdlt backends get. See kMaxRegularizedFraction. Any
+  // bad zero-row pivot is an automatic failure, no fraction threshold -- see the class comment.
+  info_ = (num_bad_zero > 0 ||
+           static_cast<Scalar>(num_regularized) > kMaxRegularizedFraction * static_cast<Scalar>(n))
               ? Eigen::NumericalIssue
               : Eigen::Success;
 }

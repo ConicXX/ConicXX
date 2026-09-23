@@ -16,6 +16,45 @@ enum class LinearSolverBackend {
                     ///< refactorize-from-scratch retry loop
 };
 
+/// KKT regularization settings (Vanderbei quasi-definite construction), broken out per cone type
+/// instead of per matrix side -- the whole point of Phase 2 is that equality (zero-cone) rows are
+/// regularized differently (by default, not at all) from orthant/SOC rows, which the old flat
+/// static_reg_P/static_reg_A pair couldn't express.
+struct RegularizationSettings {
+  // --- Static regularization: fixed amounts, added once to K_fact's diagonal (never K_exact's;
+  // see KktSystem's K_exact/K_fact split). Signs are applied internally: + on the P (x) block,
+  // - on the Hs (z) block, matching the KKT matrix's [P+.. A'; A -Hs-..] sign convention. ---
+  Scalar static_P = 1e-8;       ///< (1,1) block diagonal (P)
+  Scalar static_nonneg = 1e-8;  ///< nonnegative-orthant rows of the (2,2) block
+  Scalar static_soc = 1e-8;     ///< second-order-cone rows of the (2,2) block
+  Scalar static_zero = 0.0;     ///< equality (zero-cone) rows: exactly zero perturbation by default
+
+  /// Additional static regularization, proportional to max|diag(K_exact)|, added on top of the
+  /// fixed static_P/static_nonneg/static_soc amounts above (0 on zero rows, same as those). Keeps
+  /// the fixed floor from becoming numerically irrelevant on a problem whose K is scaled far above
+  /// or below O(1) (e.g. after equilibration failed to fully normalize an extreme instance).
+  Scalar static_proportional = 2.2e-16 * 2.2e-16;
+
+  /// Zero rows get 0 static regularization in K_exact (always) and static_zero in K_fact (above,
+  /// 0 by default) -- but if that alone leaves K_fact's zero-row block unfactorizable (a genuinely
+  /// singular pivot from the elimination order, not necessarily true rank deficiency), this is
+  /// tried once, in K_fact only, as a preconditioner: refinement against K_exact removes its
+  /// effect on the solution. If it's still not enough, KktSystem reports
+  /// Info::equality_rank_deficient instead of silently accepting a bad factorization.
+  Scalar static_zero_factor_only = 1e-10;
+
+  // --- Dynamic regularization: an outer per-pivot-magnitude retry loop bumps these (10x per
+  // attempt) only for the block a bad pivot belongs to, not uniformly across the whole matrix. ---
+  Scalar dynamic_eps = 1e-13;    ///< pivot-magnitude threshold triggering a bump
+  Scalar dynamic_delta = 2e-7;   ///< bumped pivot magnitude
+
+  /// If false (default), a bad pivot on a zero (equality) row is never dynamically bumped -- it's
+  /// treated as a rank-deficiency signal (see static_zero_factor_only above and
+  /// Info::equality_rank_deficient) rather than a numerics problem to paper over. Set true to
+  /// include zero rows in the same dynamic-regularization ladder as orthant/SOC rows instead.
+  bool dynamic_on_zero_rows = false;
+};
+
 /// Solver configuration. A plain aggregate so it is cheap to copy and easy
 /// to construct with designated-initializer-style usage.
 struct Settings {
@@ -27,14 +66,14 @@ struct Settings {
   int max_iter = 200;
 
   // --- KKT regularization (Vanderbei quasi-definite construction) ---
-  Scalar static_reg_P = 1e-8;   ///< added once to (1,1) block diagonal (P)
-  Scalar static_reg_A = 1e-8;   ///< added once to (2,2) block diagonal (-Hs)
-  Scalar dynamic_reg_eps = 1e-14;  ///< pivot-magnitude threshold triggering a bump
-  Scalar dynamic_reg_delta = 1e-7; ///< bumped pivot magnitude
+  RegularizationSettings regularization;
 
-  // --- Iterative refinement on each KKT solve ---
-  int refine_max_iter = 3;
-  Scalar refine_tol = 1e-12;
+  // --- Iterative refinement on each KKT solve (against K_exact, the unregularized matrix -- see
+  // KktSystem) ---
+  int refine_max_iter = 10;
+  Scalar refine_reltol = 1e-13;
+  Scalar refine_abstol = 1e-12;
+  Scalar refine_stop_ratio = 5;  ///< stop early if the residual doesn't shrink by this factor/step
 
   // --- Step length ---
   Scalar max_step_fraction = 0.99;  ///< fraction-to-boundary safety factor

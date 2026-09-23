@@ -229,6 +229,44 @@ Investigate the latest commit message ("Possibly found bug in custom ldlt decomp
   never return a wrong "Solved".
 - Benchmarks: no instance may stop converging.
 
+**Done: T2.1–T2.4, T2.5 Option A.** `RegularizationSettings` (per-cone-type static/dynamic
+regularization + `static_proportional` + `static_zero_factor_only`), `KktSystem`'s `K_exact_`/
+`K_fact_` split (refinement always targets `K_exact_`; only diagonal slots are ever rewritten in
+the per-iteration hot path, never a whole-matrix copy), per-block dynamic-regularization ladder
+(zero rows excluded by default, see `dynamic_on_zero_rows`), `RegularizedLdlt` now never
+dynamically corrects a zero-cone pivot (a real gap relative to "never perturb equalities" that
+this phase's stricter design exposed — it previously treated the whole Hs block, including
+equality rows, as one uniformly-correctable side), and T2.5 Option A's zero-row factor-only
+fallback (escalating, not one-shot — see below). `Info::kkt_refinement_residual` and
+`equality_rank_deficient` wired from `KktSystem` through to `Solution::info`. Skipped, as scoped:
+T2.5 Option B (SuiteSparse CAMD — optional per the task, no maintainer ask needed to skip) and the
+proximal treatment of redundant equalities (explicitly maintainer-sign-off-gated; not implemented,
+not asked about this session since it isn't required by the accept criteria above, which the
+rank-deficiency flag alone satisfies).
+
+New tests: the 3-equality/SOC/orthant solution check and a duplicated-equality-row check through
+the full `Solver` (`test/solver/test_solve_equality_robustness.cpp`); a `KktSystem`-level check
+that a Newton solve's zero-cone rows satisfy `A_E dx = rhs_E` to 1e-12 exactly, plus the
+already-existing duplicated-row `KktSystem`/backend-parameterized tests, updated for the new
+"refinement targets the exact system" semantics; `RegularizedLdlt` vs `QdldlLdlt` agreement with
+no correction needed, and a hand-verified forced-correction case confirming the additive (not
+replacing) pivot shift, reconstructed via `L D Lᵀ` (`test/kkt/test_regularized_ldlt.cpp`).
+
+Two real bugs found and fixed via this phase's own test suite (not by inspection) worth recording
+for whoever next touches `KktSystem::factorizeWithRetry()`:
+1. **Rolling back a fully-escalated dynamic bump via subtraction is not numerically safe.** After
+   the per-block ladder exhausts 18 attempts (×10 growth each), the accumulated bump reaches
+   ~10¹⁸× the static baseline; `baseline + bump` has already rounded away the baseline entirely
+   in double precision by then (`1e-8 + 2e10` rounds to exactly `2e10`), so `... - bump` afterward
+   does not recover `1e-8`, it gives exactly `0`. Caught via a real single-equality-row SOCP
+   (`SolveSocp.MinimizeFirstCoordinateOverCone`, no duplication at all) that started silently
+   returning `MaxIterations` after this phase's changes. Fixed by re-deriving the baseline fresh
+   from `K_exact_` (`rebuildKFactDiagonal()`) instead of trying to reverse a lossy accumulation.
+2. **`Settings::regularization.static_zero_factor_only`'s default (1e-10) is frequently too small
+   to matter** relative to an O(1)-scale Hs block elsewhere in the same matrix — needed to become
+   an escalating ladder (×10 per attempt, same shape as the other blocks) rather than a single
+   fixed-magnitude attempt, or the same simple SOCP case above failed even `setup()` outright.
+
 ---
 
 ## Phase 3 — Correct SOC scaling; replace clamps with safeguards

@@ -31,31 +31,42 @@ namespace conicxx::detail {
 ///
 /// Expects the KKT system's Vanderbei quasi-definite convention (see Settings' "KKT
 /// regularization" section): rows/cols [0, nx) (the P block) must stay positive, rows/cols
-/// [nx, n) (the -Hs block) must stay negative. `analyzePattern()` records which permuted
-/// position each expectation applies to, since AMD reorders rows/cols.
+/// [nx, n) (the -Hs block) must stay negative -- EXCEPT zero-cone (equality) rows, which this
+/// class never corrects, dynamically or otherwise (see `is_zero_row` below): perturbing an
+/// equality row is exactly what Phase 2's regularization redesign forbids by default, and doing
+/// it silently here, inside an inline per-pivot correction the outer KktSystem retry loop cannot
+/// see, would undermine that guarantee for this backend specifically. `analyzePattern()` records
+/// which permuted position each expectation (and each row's correctability) applies to, since
+/// AMD reorders rows/cols.
 class RegularizedLdlt {
  public:
   /// One-time: computes the AMD ordering, the elimination tree/L sparsity pattern, and the
-  /// per-permuted-position expected pivot sign, from K_lower's structure and the P/-Hs block
-  /// split at `nx`. Must be called again if K_lower's sparsity pattern changes.
-  void analyzePattern(const SparseMat& K_lower, Index nx, Scalar dynamic_reg_eps,
-                      Scalar dynamic_reg_delta);
+  /// per-permuted-position expected pivot sign and correctability, from K_lower's structure, the
+  /// P/-Hs block split at `nx`, and `is_zero_row` (size K_lower.rows(), original/unpermuted
+  /// indexing -- 1 for a zero-cone row, which is never corrected regardless of sign/magnitude).
+  /// Must be called again if K_lower's sparsity pattern changes.
+  void analyzePattern(const SparseMat& K_lower, const std::vector<unsigned char>& is_zero_row,
+                      Index nx, Scalar dynamic_reg_eps, Scalar dynamic_reg_delta);
 
   /// Refreshes the permuted-upper mirror of K_lower's values and runs the regularized numeric
   /// factorization. K_lower must have the same sparsity pattern passed to the last
   /// analyzePattern() call. A pivot that is too small or has the wrong sign is corrected in
-  /// place rather than aborting the factorization -- but see info(): if that happens for too
-  /// large a fraction of pivots, factorize() still reports failure rather than silently
-  /// returning a factorization from a heavily-doctored matrix.
+  /// place rather than aborting the factorization, UNLESS it is a zero-cone row (never
+  /// corrected -- see the class comment) -- but see info(): if too large a fraction of the
+  /// correctable pivots needed correction, or if *any* zero-cone pivot was bad, factorize() still
+  /// reports failure rather than silently returning a factorization from a heavily-doctored
+  /// matrix or a perturbed equality row.
   void factorize(const SparseMat& K_lower);
 
   /// Solves K_lower * x = rhs using the current factorization.
   Vec solve(const Vec& rhs) const;
 
-  /// Eigen::NumericalIssue if more than kMaxRegularizedFraction of pivots needed correction in
-  /// the last factorize() call (see regularized_ldlt.cpp) -- lets KktSystem's
-  /// factorizeWithRetry() fall back to its uniform whole-matrix bump instead of accepting a
-  /// factorization built from many independently-doctored pivots. Otherwise Eigen::Success.
+  /// Eigen::NumericalIssue if more than kMaxRegularizedFraction of the correctable (non-zero-row)
+  /// pivots needed correction in the last factorize() call, or if any zero-row pivot was bad (see
+  /// regularized_ldlt.cpp) -- lets KktSystem's factorizeWithRetry() fall back to its per-block
+  /// bump (and, for zero rows, the static_zero_factor_only fallback / equality_rank_deficient
+  /// signal) instead of accepting a factorization built from many independently-doctored pivots
+  /// or a perturbed equality row. Otherwise Eigen::Success.
   Eigen::ComputationInfo info() const { return info_; }
 
   /// Number of pivots corrected by the last factorize() call (0 on a clean factorization).
@@ -78,11 +89,15 @@ class RegularizedLdlt {
   // analyzePattern() from the AMD permutation, since factorize() operates entirely in permuted
   // coordinates.
   std::vector<Scalar> expected_sign_;
+  // correctable_[k]: false if permuted position k is a zero-cone (equality) row -- see the class
+  // comment. A bad pivot there is never corrected, only counted (num_bad_zero_pivots_).
+  std::vector<unsigned char> correctable_;
 
   Index n_ = 0;
   Scalar dynamic_reg_eps_ = 0, dynamic_reg_delta_ = 0;
   Eigen::ComputationInfo info_ = Eigen::NumericalIssue;
   Index num_regularized_pivots_ = 0;
+  Index num_bad_zero_pivots_ = 0;
 };
 
 }  // namespace conicxx::detail

@@ -27,12 +27,14 @@ add_executable(conicxx_tests
   kkt/test_sparsity_map.cpp
   kkt/test_kkt_system.cpp
   kkt/test_kkt_system_backends.cpp
+  kkt/test_regularized_ldlt.cpp
   kkt/test_equilibration.cpp
   solver/test_solve_qp.cpp
   solver/test_solve_lp.cpp
   solver/test_solve_socp.cpp
   solver/test_solve_friction_qp_soc.cpp
   solver/test_solve_dense_input.cpp
+  solver/test_solve_equality_robustness.cpp
   solver/test_infeasible.cpp
   solver/test_update_reuse.cpp
   version/test_version.cpp
