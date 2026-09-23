@@ -80,6 +80,30 @@ void RegularizedLdlt::analyzePattern(const SparseMat& K_lower,
   A_upper_.selfadjointView<Eigen::Upper>() = K_lower.selfadjointView<Eigen::Lower>().twistedBy(perm_);
   A_upper_.makeCompressed();
 
+  // Precompute value_scatter_ (T7.3) -- see QdldlLdlt::analyzePattern()'s comment for the full
+  // rationale: this re-runs twistedBy() once more with sentinel values to discover, empirically,
+  // where each of K_lower's stored values lands in A_upper_, so factorize() can scatter directly
+  // (O(nnz), no allocation) instead of calling twistedBy() itself on every IPM iteration.
+  {
+    const Index nnzK = K_lower.nonZeros();
+    SparseMat K_sentinel = K_lower;
+    for (Index k = 0; k < nnzK; ++k) {
+      K_sentinel.valuePtr()[k] = static_cast<Scalar>(k + 1);
+    }
+    SparseMat A_sentinel(n_, n_);
+    A_sentinel.selfadjointView<Eigen::Upper>() =
+        K_sentinel.selfadjointView<Eigen::Lower>().twistedBy(perm_);
+    A_sentinel.makeCompressed();
+
+    value_scatter_.assign(static_cast<size_t>(nnzK), -1);
+    for (Index i = 0; i < A_sentinel.nonZeros(); ++i) {
+      const Index k = static_cast<Index>(std::llround(A_sentinel.valuePtr()[i])) - 1;
+      value_scatter_[static_cast<size_t>(k)] = i;
+    }
+  }
+
+  solve_scratch_.resize(n_);
+
   std::vector<Index> work(static_cast<size_t>(n_));
   etree_.assign(static_cast<size_t>(n_), 0);
   Lnz_.assign(static_cast<size_t>(n_), 0);
@@ -156,9 +180,16 @@ inline bool pivotIsBad(Scalar Dk, Scalar expected_sign, Scalar eps) {
 void RegularizedLdlt::factorize(const SparseMat& K_lower) {
   // Precondition: analyzePattern(K_lower, ...) has already been called with the same sparsity
   // pattern (matches Eigen::SimplicialLDLT's/QdldlLdlt's own analyzePattern-once/factorize-many
-  // contract).
-  A_upper_.selfadjointView<Eigen::Upper>() = K_lower.selfadjointView<Eigen::Lower>().twistedBy(perm_);
-  A_upper_.makeCompressed();
+  // contract). Scatter values directly via the precomputed map (T7.3) -- no twistedBy() call, no
+  // allocation. See QdldlLdlt::factorize() for the identical pattern.
+  {
+    const Index nnzK = K_lower.nonZeros();
+    const Scalar* Kx = K_lower.valuePtr();
+    Scalar* Ax_scatter = A_upper_.valuePtr();
+    for (Index k = 0; k < nnzK; ++k) {
+      Ax_scatter[value_scatter_[static_cast<size_t>(k)]] = Kx[k];
+    }
+  }
 
   const Index n = n_;
   const Index* Ap = A_upper_.outerIndexPtr();
@@ -279,10 +310,10 @@ void RegularizedLdlt::factorize(const SparseMat& K_lower) {
               : Eigen::Success;
 }
 
-Vec RegularizedLdlt::solve(const Vec& rhs) const {
-  Vec x = perm_ * rhs;
-  QDLDL_solve(n_, Lp_.data(), Li_.data(), Lx_.data(), Dinv_.data(), x.data());
-  return perm_.inverse() * x;
+void RegularizedLdlt::solve(const Vec& rhs, Eigen::Ref<Vec> out) const {
+  solve_scratch_ = perm_ * rhs;
+  QDLDL_solve(n_, Lp_.data(), Li_.data(), Lx_.data(), Dinv_.data(), solve_scratch_.data());
+  out = perm_.inverse() * solve_scratch_;
 }
 
 }  // namespace conicxx::detail

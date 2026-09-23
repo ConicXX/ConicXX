@@ -70,21 +70,35 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
   for (Index i = 0; i < n_; ++i) {
     p_diag_slots_.push_back(sparsity_.addEntry(i, i));
   }
+  p_diag_value_idx_.assign(static_cast<size_t>(n_), -1);
 
-  for (Index c = 0; c < P_upper.outerSize(); ++c) {
-    for (SparseMat::InnerIterator it(P_upper, c); it; ++it) {
-      const Index r = static_cast<Index>(it.row());
-      if (r >= c) continue;  // diagonal handled above; input assumed upper-triangular
-      const Index slot = sparsity_.addEntry(c, r);
-      p_offdiag_slots_.emplace_back(slot, r, c);
+  // k tracks the running index into P_upper.valuePtr(): InnerIterator visits a compressed
+  // SparseMatrix's stored entries in exactly that order (increasing per column, columns in
+  // order), so incrementing once per step keeps k equal to the valuePtr() position throughout.
+  {
+    Index k = 0;
+    for (Index c = 0; c < P_upper.outerSize(); ++c) {
+      for (SparseMat::InnerIterator it(P_upper, c); it; ++it, ++k) {
+        const Index r = static_cast<Index>(it.row());
+        if (r > c) continue;  // below diagonal; input assumed upper-triangular
+        if (r == c) {
+          p_diag_value_idx_[static_cast<size_t>(c)] = k;
+          continue;
+        }
+        const Index slot = sparsity_.addEntry(c, r);
+        p_offdiag_slots_.emplace_back(slot, k);
+      }
     }
   }
 
-  for (Index c = 0; c < A.outerSize(); ++c) {
-    for (SparseMat::InnerIterator it(A, c); it; ++it) {
-      const Index r = static_cast<Index>(it.row());
-      const Index slot = sparsity_.addEntry(n_ + r, c);
-      a_slots_.emplace_back(slot, r, c);
+  {
+    Index k = 0;
+    for (Index c = 0; c < A.outerSize(); ++c) {
+      for (SparseMat::InnerIterator it(A, c); it; ++it, ++k) {
+        const Index r = static_cast<Index>(it.row());
+        const Index slot = sparsity_.addEntry(n_ + r, c);
+        a_slots_.emplace_back(slot, k);
+      }
     }
   }
 
@@ -152,6 +166,9 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
   K_fact_ = K_exact_;  // same structure; values diverge via writes/rebuildKFactDiagonal() below
   backendAnalyzePattern(K_fact_);
 
+  refine_r_.resize(n_ + m_);
+  refine_dx_.resize(n_ + m_);
+
   p_outer_ref_.assign(P_upper.outerIndexPtr(), P_upper.outerIndexPtr() + P_upper.outerSize() + 1);
   p_inner_ref_.assign(P_upper.innerIndexPtr(), P_upper.innerIndexPtr() + P_upper.nonZeros());
   a_outer_ref_.assign(A.outerIndexPtr(), A.outerIndexPtr() + A.outerSize() + 1);
@@ -172,19 +189,22 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
 bool KktSystem::writePAValues(const SparseMat* P_upper, const SparseMat* A) {
   if (P_upper) {
     if (!sameSparsityPattern(*P_upper, p_outer_ref_, p_inner_ref_)) return false;
+    const Scalar* Px = P_upper->valuePtr();
     for (Index i = 0; i < n_; ++i) {
-      sparsity_.setValue(K_exact_, p_diag_slots_[static_cast<size_t>(i)], P_upper->coeff(i, i));
+      const Index k = p_diag_value_idx_[static_cast<size_t>(i)];
+      sparsity_.setValue(K_exact_, p_diag_slots_[static_cast<size_t>(i)], k >= 0 ? Px[k] : Scalar(0));
     }
-    for (const auto& [slot, r, c] : p_offdiag_slots_) {
-      const Scalar v = P_upper->coeff(r, c);
+    for (const auto& [slot, k] : p_offdiag_slots_) {
+      const Scalar v = Px[k];
       sparsity_.setValue(K_exact_, slot, v);
       sparsity_.setValue(K_fact_, slot, v);  // off-diagonal P entries are never regularized
     }
   }
   if (A) {
     if (!sameSparsityPattern(*A, a_outer_ref_, a_inner_ref_)) return false;
-    for (const auto& [slot, r, c] : a_slots_) {
-      const Scalar v = A->coeff(r, c);
+    const Scalar* Ax = A->valuePtr();
+    for (const auto& [slot, k] : a_slots_) {
+      const Scalar v = Ax[k];
       sparsity_.setValue(K_exact_, slot, v);
       sparsity_.setValue(K_fact_, slot, v);  // A block is never regularized
     }
@@ -285,20 +305,28 @@ Eigen::ComputationInfo KktSystem::backendInfo() const {
   return ldlt_eigen_.info();
 }
 
-Vec KktSystem::backendVectorD() const {
+Scalar KktSystem::backendMinAbsD() const {
 #ifdef CONICXX_HAVE_QDLDL
-  if (use_regularized_) return ldlt_reg_.vectorD();
-  if (use_qdldl_) return ldlt_qdldl_.vectorD();
+  if (use_regularized_) return ldlt_reg_.minAbsD();
+  if (use_qdldl_) return ldlt_qdldl_.minAbsD();
 #endif
-  return ldlt_eigen_.vectorD();
+  // Eigen::SimplicialLDLT::vectorD() returns a const reference to its own internal storage (no
+  // copy), so this doesn't materialize an owned Vec either.
+  return ldlt_eigen_.vectorD().array().abs().minCoeff();
 }
 
-Vec KktSystem::backendSolve(const Vec& rhs) const {
+void KktSystem::backendSolve(const Vec& rhs, Eigen::Ref<Vec> out) const {
 #ifdef CONICXX_HAVE_QDLDL
-  if (use_regularized_) return ldlt_reg_.solve(rhs);
-  if (use_qdldl_) return ldlt_qdldl_.solve(rhs);
+  if (use_regularized_) {
+    ldlt_reg_.solve(rhs, out);
+    return;
+  }
+  if (use_qdldl_) {
+    ldlt_qdldl_.solve(rhs, out);
+    return;
+  }
 #endif
-  return ldlt_eigen_.solve(rhs);
+  out = ldlt_eigen_.solve(rhs);
 }
 
 bool KktSystem::tryFactorizeCurrentKFact() {
@@ -307,8 +335,7 @@ bool KktSystem::tryFactorizeCurrentKFact() {
   // symbolic analysis from scratch on every IPM iteration.
   backendFactorize(K_fact_);
   if (backendInfo() != Eigen::Success) return false;
-  const Vec D = backendVectorD();
-  const Scalar minAbsD = D.size() > 0 ? D.array().abs().minCoeff() : Scalar(1.0);
+  const Scalar minAbsD = dim() > 0 ? backendMinAbsD() : Scalar(1.0);
   return std::isfinite(minAbsD) && minAbsD > dynamic_eps_;
 }
 
@@ -425,7 +452,7 @@ bool KktSystem::escalateAndResolve(const Vec& rhs, Vec& x_out) {
     extra_nonneg = new_extra_nonneg;
     extra_soc = new_extra_soc;
     if (!tryFactorizeCurrentKFact()) continue;
-    x_out = backendSolve(rhs);
+    backendSolve(rhs, x_out);
     if (x_out.allFinite()) {
       last_extra_p_ = extra_p;
       last_extra_nonneg_ = extra_nonneg;
@@ -437,20 +464,25 @@ bool KktSystem::escalateAndResolve(const Vec& rhs, Vec& x_out) {
 }
 
 Scalar KktSystem::solve(const Vec& rhs, Vec& x_out) {
-  x_out = backendSolve(rhs);
+  // backendSolve() writes into x_out via Eigen::Ref, which -- unlike a plain Vec assignment --
+  // does not resize a mismatched target, so a caller passing a not-yet-sized (or stale-sized)
+  // x_out here would be writing out of bounds. Callers on the per-iteration hot path pre-size
+  // their buffer once and never hit this; this guards the (cheap, no-op once sized) general case.
+  if (x_out.size() != n_ + m_) x_out.resize(n_ + m_);
+  backendSolve(rhs, x_out);
   if (!x_out.allFinite()) escalateAndResolve(rhs, x_out);
 
   const Scalar rhsNorm = std::max(rhs.norm(), Scalar(1e-30));
   const Scalar tol = refine_abstol_ + refine_reltol_ * rhsNorm;
 
-  Vec r = rhs - K_exact_.selfadjointView<Eigen::Lower>() * x_out;
-  Scalar resNorm = r.norm();
+  refine_r_.noalias() = rhs - K_exact_.selfadjointView<Eigen::Lower>() * x_out;
+  Scalar resNorm = refine_r_.norm();
 
   for (int it = 0; it < refine_max_iter_ && resNorm > tol; ++it) {
-    const Vec dx = backendSolve(r);
-    x_out += dx;
-    r = rhs - K_exact_.selfadjointView<Eigen::Lower>() * x_out;
-    const Scalar newResNorm = r.norm();
+    backendSolve(refine_r_, refine_dx_);
+    x_out += refine_dx_;
+    refine_r_.noalias() = rhs - K_exact_.selfadjointView<Eigen::Lower>() * x_out;
+    const Scalar newResNorm = refine_r_.norm();
     const bool shrinking_enough = newResNorm <= resNorm / refine_stop_ratio_;
     resNorm = newResNorm;
     if (!shrinking_enough) break;  // stagnating -- more iterations won't help

@@ -51,6 +51,37 @@ bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, con
   dz_ = Vec::Zero(m_);
   ds_ = Vec::Zero(m_);
 
+  kkt_rhs_.resize(n_ + m_);
+  kkt_sol_.resize(n_ + m_);
+  Pmul_scratch_.resize(n_);
+  xi_scratch_.resize(n_);
+  xi_minus_x1_scratch_.resize(n_);
+  Hz_scratch_.resize(m_);
+  Atz_scratch_.resize(n_);
+  Ax_scratch_.resize(m_);
+  dz_table_.resize(m_);
+  lambda_.resize(m_);
+  lambda_prod_.resize(m_);
+  Winv_ds_aff_.resize(m_);
+  W_dz_aff_.resize(m_);
+  corrector_.resize(m_);
+  ds_combined_.resize(m_);
+  lambda_inv_ds_.resize(m_);
+  ds_const_.resize(m_);
+  s_trial_.resize(m_);
+  z_trial_.resize(m_);
+  lambda_trial_.resize(m_);
+  rx_inf_.resize(n_);
+  rz_inf_.resize(m_);
+  s_aff_scratch_.resize(m_);
+  z_aff_scratch_.resize(m_);
+  warm_x_trial_.resize(n_);
+  warm_s_trial_.resize(m_);
+  warm_z_trial_.resize(m_);
+  sol_x_scratch_.resize(n_);
+  sol_s_scratch_.resize(m_);
+  sol_z_scratch_.resize(m_);
+
   have_warm_start_ = false;
   solution_ = Solution{};
   setup_done_ = true;
@@ -103,8 +134,6 @@ void SolverImpl::setWarmStart(const Vec& x, const Vec& s, const Vec& z) {
   if (settings_.equilibrate) equil_.scaleSolution(warm_x_, warm_s_, warm_z_);
   have_warm_start_ = true;
 }
-
-Vec SolverImpl::Pmul(const Vec& v) const { return P_.selfadjointView<Eigen::Upper>() * v; }
 
 void SolverImpl::cacheEquilibrationWeights() {
   // Always valid regardless of settings_.equilibrate: d_eff_/e_eff_ are the real Ruiz weights
@@ -195,24 +224,23 @@ bool SolverImpl::computeInitialPoint() {
   cones_->updateScaling(cones_->identityElement(), cones_->identityElement());
   if (!kkt_.updateScalingAndFactorize(*cones_)) return false;
 
-  Vec rhs(n_ + m_), sol;
   if (P_.nonZeros() == 0) {
-    rhs.head(n_).setZero();
-    rhs.tail(m_) = b_;
-    kkt_.solve(rhs, sol);
-    x_ = sol.head(n_);
-    s_ = -sol.tail(m_);
+    kkt_rhs_.head(n_).setZero();
+    kkt_rhs_.tail(m_) = b_;
+    kkt_.solve(kkt_rhs_, kkt_sol_);
+    x_ = kkt_sol_.head(n_);
+    s_ = -kkt_sol_.tail(m_);
 
-    rhs.head(n_) = -q_;
-    rhs.tail(m_).setZero();
-    kkt_.solve(rhs, sol);
-    z_ = sol.tail(m_);
+    kkt_rhs_.head(n_) = -q_;
+    kkt_rhs_.tail(m_).setZero();
+    kkt_.solve(kkt_rhs_, kkt_sol_);
+    z_ = kkt_sol_.tail(m_);
   } else {
-    rhs.head(n_) = -q_;
-    rhs.tail(m_) = b_;
-    kkt_.solve(rhs, sol);
-    x_ = sol.head(n_);
-    z_ = sol.tail(m_);
+    kkt_rhs_.head(n_) = -q_;
+    kkt_rhs_.tail(m_) = b_;
+    kkt_.solve(kkt_rhs_, kkt_sol_);
+    x_ = kkt_sol_.head(n_);
+    z_ = kkt_sol_.tail(m_);
     s_ = -z_;
   }
 
@@ -231,21 +259,21 @@ bool SolverImpl::refactorizeForCurrentScaling() {
 }
 
 bool SolverImpl::computeConstantSolve() {
-  Vec rhs(n_ + m_);
-  rhs.head(n_) = -q_;
-  rhs.tail(m_) = b_;
-  Vec sol;
-  kkt_.solve(rhs, sol);
-  x1_ = sol.head(n_);
-  z1_ = sol.tail(m_);
-  Px1_ = Pmul(x1_);
+  kkt_rhs_.head(n_) = -q_;
+  kkt_rhs_.tail(m_) = b_;
+  kkt_.solve(kkt_rhs_, kkt_sol_);
+  x1_ = kkt_sol_.head(n_);
+  z1_ = kkt_sol_.tail(m_);
+  Pmul(x1_, Px1_);
   return x1_.allFinite() && z1_.allFinite();
 }
 
 void SolverImpl::computeResiduals() {
-  Px_ = Pmul(x_);
-  rx_ = -(A_.transpose() * z_) - Px_ - tau_ * q_;
-  rz_ = A_ * x_ + s_ - tau_ * b_;
+  Pmul(x_, Px_);
+  Atz_scratch_.noalias() = A_.transpose() * z_;
+  rx_ = -Atz_scratch_ - Px_ - tau_ * q_;
+  Ax_scratch_.noalias() = A_ * x_;
+  rz_ = Ax_scratch_ + s_ - tau_ * b_;
   dot_qx_ = q_.dot(x_);
   dot_bz_ = b_.dot(z_);
   dot_sz_ = s_.dot(z_);
@@ -265,32 +293,32 @@ bool SolverImpl::computeAffineStep() {
   // the CONSTANT one -- this maps onto Clarabel's kktsystem.rs exactly,
   // where (confusingly) `self.x1/z1` denotes the per-call variable solve
   // and `self.x2/z2` denotes the constant one.
-  Vec rhs(n_ + m_);
-  rhs.head(n_) = rx_;
-  rhs.tail(m_) = s_ - rz_;
-  Vec sol;
-  kkt_.solve(rhs, sol);
-  Vec xv = sol.head(n_), zv = sol.tail(m_);
+  kkt_rhs_.head(n_) = rx_;
+  kkt_rhs_.tail(m_) = s_ - rz_;
+  kkt_.solve(kkt_rhs_, kkt_sol_);
+  const auto xv = kkt_sol_.head(n_);
+  const auto zv = kkt_sol_.tail(m_);
   if (!xv.allFinite() || !zv.allFinite()) return false;
 
   const Scalar dtau_rhs = rtau_;
   const Scalar dkappa_rhs = tau_ * kappa_;
-  const Vec xi = x_ / tau_;
+  xi_scratch_ = x_ / tau_;
 
-  const Scalar tau_num =
-      dtau_rhs - dkappa_rhs / tau_ + q_.dot(xv) + b_.dot(zv) + 2.0 * xi.dot(Pmul(xv));
-  const Vec xi_minus_x1 = xi - x1_;
+  Pmul(xv, Pmul_scratch_);
+  const Scalar tau_num = dtau_rhs - dkappa_rhs / tau_ + q_.dot(xv) + b_.dot(zv) +
+                          2.0 * xi_scratch_.dot(Pmul_scratch_);
+  xi_minus_x1_scratch_ = xi_scratch_ - x1_;
+  Pmul(xi_minus_x1_scratch_, Pmul_scratch_);
   const Scalar tau_den = kappa_ / tau_ - q_.dot(x1_) - b_.dot(z1_) +
-                          xi_minus_x1.dot(Pmul(xi_minus_x1)) - x1_.dot(Px1_);
+                          xi_minus_x1_scratch_.dot(Pmul_scratch_) - x1_.dot(Px1_);
   if (tau_den == 0.0 || !std::isfinite(tau_num) || !std::isfinite(tau_den)) return false;
 
   dtau_aff_ = tau_num / tau_den;
   dx_aff_ = xv + dtau_aff_ * x1_;
   dz_aff_ = zv + dtau_aff_ * z1_;
 
-  Vec Hz(m_);
-  cones_->mulHs(dz_aff_, Hz);
-  ds_aff_ = -(Hz + s_);
+  cones_->mulHs(dz_aff_, Hz_scratch_);
+  ds_aff_ = -(Hz_scratch_ + s_);
 
   dkappa_aff_ = -(dkappa_rhs + kappa_ * dtau_aff_) / tau_;
 
@@ -299,53 +327,46 @@ bool SolverImpl::computeAffineStep() {
 }
 
 bool SolverImpl::computeCombinedStep(Scalar sigma, Scalar mu) {
-  const Vec dz_table = (1.0 - sigma) * rz_;
+  dz_table_ = (1.0 - sigma) * rz_;
 
-  Vec lambda(m_);
-  cones_->applyW(z_, lambda);
-  Vec lambda_prod(m_);
-  cones_->product(lambda, lambda, lambda_prod);
+  cones_->applyW(z_, lambda_);
+  cones_->product(lambda_, lambda_, lambda_prod_);
 
-  Vec Winv_ds_aff(m_);
-  cones_->applyWInv(ds_aff_, Winv_ds_aff);
-  Vec W_dz_aff(m_);
-  cones_->applyW(dz_aff_, W_dz_aff);
-  Vec corrector(m_);
-  cones_->product(Winv_ds_aff, W_dz_aff, corrector);
+  cones_->applyWInv(ds_aff_, Winv_ds_aff_);
+  cones_->applyW(dz_aff_, W_dz_aff_);
+  cones_->product(Winv_ds_aff_, W_dz_aff_, corrector_);
 
-  const Vec ds_combined = lambda_prod + corrector - sigma * mu * cones_->identityElement();
+  ds_combined_ = lambda_prod_ + corrector_ - sigma * mu * cones_->identityElement();
 
-  Vec lambda_inv_ds(m_);
-  cones_->inverseProduct(lambda, ds_combined, lambda_inv_ds);
-  Vec ds_const(m_);
-  cones_->applyW(lambda_inv_ds, ds_const);
+  cones_->inverseProduct(lambda_, ds_combined_, lambda_inv_ds_);
+  cones_->applyW(lambda_inv_ds_, ds_const_);
 
-  Vec rhs(n_ + m_);
-  rhs.head(n_) = (1.0 - sigma) * rx_;
-  rhs.tail(m_) = ds_const - dz_table;
-  Vec sol;
-  kkt_.solve(rhs, sol);
-  Vec xv = sol.head(n_), zv = sol.tail(m_);
+  kkt_rhs_.head(n_) = (1.0 - sigma) * rx_;
+  kkt_rhs_.tail(m_) = ds_const_ - dz_table_;
+  kkt_.solve(kkt_rhs_, kkt_sol_);
+  const auto xv = kkt_sol_.head(n_);
+  const auto zv = kkt_sol_.tail(m_);
   if (!xv.allFinite() || !zv.allFinite()) return false;
 
   const Scalar dtau_rhs = (1.0 - sigma) * rtau_;
   const Scalar dkappa_rhs = tau_ * kappa_ + dtau_aff_ * dkappa_aff_ - sigma * mu;
 
-  const Vec xi = x_ / tau_;
-  const Scalar tau_num =
-      dtau_rhs - dkappa_rhs / tau_ + q_.dot(xv) + b_.dot(zv) + 2.0 * xi.dot(Pmul(xv));
-  const Vec xi_minus_x1 = xi - x1_;
+  xi_scratch_ = x_ / tau_;
+  Pmul(xv, Pmul_scratch_);
+  const Scalar tau_num = dtau_rhs - dkappa_rhs / tau_ + q_.dot(xv) + b_.dot(zv) +
+                          2.0 * xi_scratch_.dot(Pmul_scratch_);
+  xi_minus_x1_scratch_ = xi_scratch_ - x1_;
+  Pmul(xi_minus_x1_scratch_, Pmul_scratch_);
   const Scalar tau_den = kappa_ / tau_ - q_.dot(x1_) - b_.dot(z1_) +
-                          xi_minus_x1.dot(Pmul(xi_minus_x1)) - x1_.dot(Px1_);
+                          xi_minus_x1_scratch_.dot(Pmul_scratch_) - x1_.dot(Px1_);
   if (tau_den == 0.0 || !std::isfinite(tau_num) || !std::isfinite(tau_den)) return false;
 
   dtau_ = tau_num / tau_den;
   dx_ = xv + dtau_ * x1_;
   dz_ = zv + dtau_ * z1_;
 
-  Vec Hz(m_);
-  cones_->mulHs(dz_, Hz);
-  ds_ = -(Hz + ds_const);
+  cones_->mulHs(dz_, Hz_scratch_);
+  ds_ = -(Hz_scratch_ + ds_const_);
 
   dkappa_ = -(dkappa_rhs + kappa_ * dtau_) / tau_;
 
@@ -365,7 +386,6 @@ Scalar SolverImpl::computeStepLength(const Vec& ds, const Vec& dz, Scalar dtau,
 
 Scalar SolverImpl::safeguardedStepLength(Scalar alpha_max) const {
   Scalar alpha = alpha_max;
-  Vec s_trial(m_), z_trial(m_), lambda_trial(m_);
   const Scalar deg1 = static_cast<Scalar>(cones_->degree() + 1);
   // 0.8^64 ~ 6e-7, well past min_terminate_step_length's default (1e-4) for any reasonable
   // linesearch_backtrack -- this loop always terminates via the caller's tiny-step check, not by
@@ -375,10 +395,10 @@ Scalar SolverImpl::safeguardedStepLength(Scalar alpha_max) const {
     const Scalar tau_trial = tau_ + alpha * dtau_;
     const Scalar kappa_trial = kappa_ + alpha * dkappa_;
     if (tau_trial > 0.0 && kappa_trial > 0.0) {
-      s_trial = s_ + alpha * ds_;
-      z_trial = z_ + alpha * dz_;
-      const auto [min_margin_s, pos_s] = cones_->margins(s_trial);
-      const auto [min_margin_z, pos_z] = cones_->margins(z_trial);
+      s_trial_ = s_ + alpha * ds_;
+      z_trial_ = z_ + alpha * dz_;
+      const auto [min_margin_s, pos_s] = cones_->margins(s_trial_);
+      const auto [min_margin_z, pos_z] = cones_->margins(z_trial_);
       (void)pos_s;
       (void)pos_z;
       if (min_margin_s > 0.0 && min_margin_z > 0.0) {
@@ -389,13 +409,13 @@ Scalar SolverImpl::safeguardedStepLength(Scalar alpha_max) const {
         // the standard "neighborhood of the central path" formulation (N_-infinity(gamma) and
         // similar), where membership is always evaluated at the same point as the mu it's
         // compared against, not a stale one.
-        const Scalar mu_trial = (s_trial.dot(z_trial) + tau_trial * kappa_trial) / deg1;
+        const Scalar mu_trial = (s_trial_.dot(z_trial_) + tau_trial * kappa_trial) / deg1;
         // lambda = W * z_trial, using this iteration's already-computed NT scaling (from
         // refactorizeForCurrentScaling()'s updateScaling() call) -- cheap, and a good enough
         // proxy for the trial point's centrality without recomputing a fresh NT scaling for
         // every backtrack attempt.
-        cones_->applyW(z_trial, lambda_trial);
-        if (cones_->minCentrality(lambda_trial) >= settings_.centrality_theta * mu_trial) {
+        cones_->applyW(z_trial_, lambda_trial_);
+        if (cones_->minCentrality(lambda_trial_) >= settings_.centrality_theta * mu_trial) {
           return alpha;
         }
       }
@@ -457,13 +477,13 @@ SolverImpl::Metrics SolverImpl::computeMetrics() const {
 
   // rx_inf = -A'z = rx_ + Px_ + tau*q_ (since rx_ = -(A'z + Px + tau*q));
   // rz_inf =  Ax+s = rz_ + tau*b_      (since rz_ =  Ax + s - tau*b).
-  const Vec rx_inf = rx_ + Px_ + tau_ * q_;
-  const Vec rz_inf = rz_ + tau_ * b_;
+  rx_inf_ = rx_ + Px_ + tau_ * q_;
+  rz_inf_ = rz_ + tau_ * b_;
   m.res_primal_inf =
-      cinv_ * weightedInfNorm(rx_inf, dinv_eff_) / std::max(Scalar(1.0), normz_direct);
+      cinv_ * weightedInfNorm(rx_inf_, dinv_eff_) / std::max(Scalar(1.0), normz_direct);
   m.res_dual_inf = std::max(
       cinv_ * weightedInfNorm(Px_, dinv_eff_) / std::max(Scalar(1.0), normx_direct),
-      weightedInfNorm(rz_inf, einv_eff_) / std::max(Scalar(1.0), normx_direct + norms_direct));
+      weightedInfNorm(rz_inf_, einv_eff_) / std::max(Scalar(1.0), normx_direct + norms_direct));
 
   m.dot_bz = cinv_ * dot_bz_;
   m.dot_qx = cinv_ * dot_qx_;
@@ -527,12 +547,14 @@ void SolverImpl::finalizeSolution(Status status, const Metrics& m, Scalar mu) {
     scale = 1.0 / std::max(tau_, Scalar(1e-30));
   }
 
-  Vec x_out = x_ * scale, s_out = s_ * scale, z_out = z_ * scale;
-  if (settings_.equilibrate) equil_.unscaleSolution(x_out, s_out, z_out);
+  sol_x_scratch_ = x_ * scale;
+  sol_s_scratch_ = s_ * scale;
+  sol_z_scratch_ = z_ * scale;
+  if (settings_.equilibrate) equil_.unscaleSolution(sol_x_scratch_, sol_s_scratch_, sol_z_scratch_);
 
-  solution_.x = x_out;
-  solution_.s = s_out;
-  solution_.z = z_out;
+  solution_.x = sol_x_scratch_;
+  solution_.s = sol_s_scratch_;
+  solution_.z = sol_z_scratch_;
   solution_.objective = m.cost_primal;
 
   solution_.info.duality_gap = m.gap_abs;
@@ -545,12 +567,22 @@ void SolverImpl::finalizeSolution(Status status, const Metrics& m, Scalar mu) {
 }
 
 const Solution& SolverImpl::solve() {
-  solution_ = Solution{};
+  // Resetting the scalar/status fields is enough to make this call's solution_ independent of any
+  // prior one -- every return path below calls finalizeSolution(), which unconditionally
+  // overwrites x/s/z, except the setup_done_ guard just below, which clears them explicitly. A
+  // full `solution_ = Solution{}` would also discard x/s/z's already-allocated capacity, forcing
+  // a fresh heap allocation on every solve() call instead of just the first one (T7.1).
+  solution_.status = Status::Unsolved;
+  solution_.objective = 0;
+  solution_.info = Info{};
   consecutive_tiny_steps_ = 0;
   have_best_ = false;
   solve_start_ = std::chrono::steady_clock::now();
   if (!setup_done_) {
     solution_.status = Status::NumericalError;
+    solution_.x.resize(0);
+    solution_.s.resize(0);
+    solution_.z.resize(0);
     return solution_;
   }
 
@@ -560,14 +592,16 @@ const Solution& SolverImpl::solve() {
     // warm_mu0), then compare its residuals against a fresh cold start and keep whichever is
     // better -- an uncentered warm start, or one carried over from a since-substantially-changed
     // problem, should never end up worse than just starting cold.
-    Vec x_w = warm_x_, s_w = warm_s_, z_w = warm_z_;
-    cones_->zeroPrimalZeroConeBlocks(s_w);
-    recenterWarmStart(s_w, z_w);
+    warm_x_trial_ = warm_x_;
+    warm_s_trial_ = warm_s_;
+    warm_z_trial_ = warm_z_;
+    cones_->zeroPrimalZeroConeBlocks(warm_s_trial_);
+    recenterWarmStart(warm_s_trial_, warm_z_trial_);
     const Scalar tau_w = 1.0, kappa_w = settings_.warm_mu0;
 
-    x_ = x_w;
-    s_ = s_w;
-    z_ = z_w;
+    x_ = warm_x_trial_;
+    s_ = warm_s_trial_;
+    z_ = warm_z_trial_;
     tau_ = tau_w;
     kappa_ = kappa_w;
     computeResiduals();
@@ -584,9 +618,9 @@ const Solution& SolverImpl::solve() {
     const Scalar cold_merit = computeMetrics().merit;
 
     if (warm_merit <= cold_merit) {
-      x_ = x_w;
-      s_ = s_w;
-      z_ = z_w;
+      x_ = warm_x_trial_;
+      s_ = warm_s_trial_;
+      z_ = warm_z_trial_;
       tau_ = tau_w;
       kappa_ = kappa_w;
     }
@@ -648,12 +682,12 @@ const Solution& SolverImpl::solve() {
     }
 
     const Scalar alpha_aff = computeStepLength(ds_aff_, dz_aff_, dtau_aff_, dkappa_aff_);
-    const Vec s_aff = s_ + alpha_aff * ds_aff_;
-    const Vec z_aff = z_ + alpha_aff * dz_aff_;
+    s_aff_scratch_ = s_ + alpha_aff * ds_aff_;
+    z_aff_scratch_ = z_ + alpha_aff * dz_aff_;
     const Scalar tau_aff = tau_ + alpha_aff * dtau_aff_;
     const Scalar kappa_aff = kappa_ + alpha_aff * dkappa_aff_;
-    const Scalar mu_aff =
-        (s_aff.dot(z_aff) + tau_aff * kappa_aff) / static_cast<Scalar>(cones_->degree() + 1);
+    const Scalar mu_aff = (s_aff_scratch_.dot(z_aff_scratch_) + tau_aff * kappa_aff) /
+                          static_cast<Scalar>(cones_->degree() + 1);
 
     Scalar sigma;
     if (mu > 0) {

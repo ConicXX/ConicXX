@@ -71,7 +71,7 @@ void ConeSet::mulHs(const Vec& x, Eigen::Ref<Vec> out) const {
   }
 }
 
-std::pair<Scalar, Scalar> ConeSet::margins(const Vec& x) const {
+std::pair<Scalar, Scalar> ConeSet::margins(const Eigen::Ref<const Vec>& x) const {
   Scalar min_margin = std::numeric_limits<Scalar>::infinity();
   Scalar pos_margin_sum = 0.0;
   for (size_t i = 0; i < cones_.size(); ++i) {

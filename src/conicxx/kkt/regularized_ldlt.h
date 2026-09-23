@@ -58,8 +58,17 @@ class RegularizedLdlt {
   /// matrix or a perturbed equality row.
   void factorize(const SparseMat& K_lower);
 
-  /// Solves K_lower * x = rhs using the current factorization.
-  Vec solve(const Vec& rhs) const;
+  /// Solves K_lower * x = rhs using the current factorization, writing into `out` (already sized
+  /// n_) instead of allocating a new vector -- the hot-path form (T7.1).
+  void solve(const Vec& rhs, Eigen::Ref<Vec> out) const;
+
+  /// Convenience wrapper for call sites where an allocation is fine (tests,
+  /// compareLinearSolverBackends()). Not used by the per-iteration hot path.
+  Vec solve(const Vec& rhs) const {
+    Vec out(n_);
+    solve(rhs, out);
+    return out;
+  }
 
   /// Eigen::NumericalIssue if more than kMaxRegularizedFraction of the correctable (non-zero-row)
   /// pivots needed correction in the last factorize() call, or if any zero-row pivot was bad (see
@@ -76,9 +85,22 @@ class RegularizedLdlt {
   /// for why callers don't need it undone (only used for aggregate min/max-magnitude checks).
   Vec vectorD() const { return Eigen::Map<const Vec>(D_.data(), n_); }
 
+  /// min(|D_i|) over the current factorization, without materializing D as an owned Vec first --
+  /// see QdldlLdlt::minAbsD() (T7.1); KktSystem::tryFactorizeCurrentKFact() calls this every IPM
+  /// iteration.
+  Scalar minAbsD() const { return Eigen::Map<const Vec>(D_.data(), n_).array().abs().minCoeff(); }
+
  private:
   Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, Index> perm_;
   SparseMat A_upper_;  // permuted, upper-triangular mirror of K_lower; values refreshed every factorize()
+
+  // value_scatter_[k]: offset into A_upper_.valuePtr() for K_lower.valuePtr()[k] -- see
+  // QdldlLdlt::analyzePattern()'s comment for how this is computed (empirically, via twistedBy()
+  // with sentinel values, once) and why (T7.3: avoids calling twistedBy() -- a real allocation --
+  // on every factorize(), which runs once per IPM iteration).
+  std::vector<Index> value_scatter_;
+
+  mutable Vec solve_scratch_;  // size n_, reused across solve() calls (T7.1)
 
   std::vector<Index> etree_, Lnz_, Lp_, Li_, iwork_;
   std::vector<Scalar> Lx_, D_, Dinv_, fwork_;

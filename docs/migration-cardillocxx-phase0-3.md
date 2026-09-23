@@ -264,3 +264,24 @@ phase, not more** -- if you see the opposite on a real scene, that's worth repor
 `test/solver/test_warm_start.cpp`'s own accept-criteria numbers (mean iterations at ≤1%
 per-step perturbation must not exceed cold-start's) only cover a synthetic friction-chain
 sequence, not your actual scene dynamics.
+
+---
+
+## Addendum: Phase 7 (allocation-free hot path)
+
+**No API changes, and nothing behavioral to test either.** This phase was a pure internal
+performance refactor -- eliminating heap allocations from `Solver::solve()`'s per-IPM-iteration
+hot path (preallocated scratch buffers, `KktSystem`/backend `solve()` taking an out-parameter
+instead of returning `Vec` by value, a precomputed value-scatter map replacing a `twistedBy()`
+rebuild on every factorization) plus a `KktSystem::updateData()` micro-optimization (direct
+`valuePtr()` index lookups instead of `SparseMatrix::coeff()` searches). `Solver`, `Settings`,
+`Solution`, and `ConeSpec` are all unchanged; the one signature that did change
+(`ConeSet::margins()`) is on an internal class CardilloMPI has no reason to touch directly (you
+integrate through `Solver`, not `ConeSet`).
+
+**Worth knowing if you're timestep-rate-sensitive:** repeated `solve()` calls on the same `Solver`
+instance (the pattern your per-timestep loop already uses via `updateData()`/warm-starting) should
+now be measurably cheaper per call, especially for larger contact counts, since the KKT
+factorization no longer rebuilds a permuted copy of the matrix from scratch every IPM iteration.
+No iteration counts changed (verified against the full benchmark suite) -- this only affects wall-
+clock time per iteration, not how many iterations a given scene needs.

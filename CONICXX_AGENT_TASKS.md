@@ -528,6 +528,95 @@ include/namespace) and gets the same solution to 1e-7.
   directly.
 - **T7.4** Profile `FrictionChainXL` and `GroupLasso` after Phase 1 and report the top 5 hotspots.
 
+**Done.** T7.1/T7.3 turned out to be tangled: `factorize()` calling `twistedBy(perm_)` (a full
+symbolic+numeric rebuild, and a real allocation) on every IPM iteration made a literal "zero
+allocations in `solve()`" accept criterion unreachable without T7.3 first, so both were
+implemented together for `QdldlLdlt` and `RegularizedLdlt`: `analyzePattern()` now runs
+`twistedBy()` once more with each `K_lower` value replaced by a distinct sentinel (its own 1-based
+slot index), then reads back which sentinel landed at each `A_upper_` slot to build
+`value_scatter_` *empirically* (deliberately not by hand-deriving the permuted-symmetric-matrix
+index math -- this codebase has hit the "which direction does this permutation go" bug class more
+than once, see `RegularizedLdlt`'s and `QdldlLdlt`'s own AMD-inverse-permutation history in Phase
+2/earlier). `factorize()` now scatters `K_lower`'s values directly via that map (O(nnz), no
+allocation); `solve()` takes an out-parameter (`Eigen::Ref<Vec> out`) and writes through a
+`solve_scratch_` member instead of returning `Vec` by value. `KktSystem::backendSolve()` and the
+iterative-refinement loop in `KktSystem::solve()` were converted the same way (member `refine_r_`/
+`refine_dx_` buffers). `SolverImpl` got ~25 new scratch-buffer members (`kkt_rhs_`/`kkt_sol_`,
+`Pmul_scratch_`, per-cone-algebra buffers in `computeCombinedStep()`, `s_trial_`/`z_trial_`/
+`lambda_trial_` for the (const) step-length safeguard, etc.), all sized once in `setup()`;
+`Pmul()` became a template taking any Eigen expression (so a block like `kkt_sol_.head(n_)` can be
+passed straight through without a materializing copy) and writes via `out.noalias() = ...`; two
+direct sparse-times-dense products in `computeResiduals()` (`A_.transpose()*z_`, `A_*x_`) got their
+own `.noalias()` scratch targets for the same reason. `solution_ = Solution{}` at the top of
+`solve()` (which discarded `Solution::x/s/z`'s allocated capacity every call) was replaced with
+resetting just the scalar/status/`Info` fields, since every return path either overwrites x/s/z via
+`finalizeSolution()` or (the one early-exit path, `!setup_done_`) explicitly clears them itself.
+
+T7.1's accept criterion is implemented literally: `test/solver/test_alloc_free_hot_path.cpp`
+installs `__sanitizer_malloc_hook`/`__sanitizer_free_hook` (only compiled in when
+`__SANITIZE_ADDRESS__`/`__has_feature(address_sanitizer)` is set, i.e. the project's existing ASan
+build) and asserts zero hook calls during a second `solve()` on the same `Solver`
+(`settings.warm_start = false`, so both calls run the identical multi-iteration cold-start path,
+not a warm-started 1-iteration one). This caught two real remaining-allocation bugs beyond the
+locals the task list named explicitly: `ConeSet::margins(const Vec&)` forced a temporary-Vec copy
+every time `SolverImpl::shiftToInteriorCold()`/`recenterWarmStart()` called it with an
+`Eigen::Ref<Vec>` parameter (fixed by changing the signature to `Eigen::Ref<const Vec>`, which a
+plain `Vec` binds to just as cheaply); and `KktSystem::backendVectorD()` returned `Vec` by value
+every `tryFactorizeCurrentKFact()` call (once per IPM iteration, via the dynamic-regularization
+retry ladder) even though only the aggregate `min(|D_i|)` was ever used -- replaced with
+`backendMinAbsD()`, computed via each backend's new `minAbsD()` without ever materializing D as an
+owned `Vec`. Also caught (and fixed) along the way: a real correctness bug introduced mid-phase,
+not present before Phase 7 -- converting `KktSystem::backendSolve()` to the `Eigen::Ref<Vec> out`
+out-param form without also fixing `SolverImpl`'s call sites (which passed an unsized, default-
+constructed `Vec sol;`) caused every `Solver::solve()` call to segfault in Release (the old
+`x_out = backendSolve(rhs)` auto-resized `x_out`; the new form does not, since `Eigen::Ref` cannot
+resize the object it views). Fixed with a defensive resize in `KktSystem::solve()` plus converting
+the `SolverImpl` call sites to pre-sized member buffers as T7.1 required anyway.
+
+T7.2 implemented in `KktSystem::writePAValues()`/`setup()`: `p_offdiag_slots_`/`a_slots_` now
+store (K slot, index into the input matrix's own `valuePtr()`) instead of (K slot, row, col) --
+the value index is recorded once in `setup()` while iterating `P_upper`/`A`'s `InnerIterator` (in
+exactly `valuePtr()` order, verified against how a compressed `SparseMatrix` is laid out) and
+reused directly in `writePAValues()`, replacing every `SparseMat::coeff(r, c)` search
+(O(log nnz_col) per entry) with an O(1) array read. `P_upper`'s diagonal (written separately from
+`p_offdiag_slots_`, since it's populated via `p_diag_slots_`/`.coeff(i,i)` rather than the
+off-diagonal loop) got its own `p_diag_value_idx_` map with a `-1` sentinel for "not stored in the
+input, value implicitly 0" -- preserving `coeff()`'s exact absent-entry semantics.
+
+T7.4: profiled with `valgrind --tool=callgrind` (`perf` is unusable in this sandbox --
+`perf_event_paranoid`/missing kernel module -- so callgrind stood in) on a standalone driver
+solving `FrictionChainXL(264, mu=0.7)` x40 and `GroupLasso(60, 5, 480)` x60 back-to-back (isolating
+these two families specifically, rather than the whole suite). Top 5 by self-time (Ir events):
+1. `QDLDL_factor` (42%) -- the numeric LDL^T factorization inner loop; inherent per-iteration
+   algorithmic cost, not overhead, and out of this phase's scope.
+2. Eigen's dense GEMM microkernel `gebp_kernel` (4.7%) -- dense per-block linear algebra, almost
+   certainly the SOC blocks' NT-scaling computation (both benchmark families are SOC-heavy).
+3/6. `QDLDL_Lsolve`/`QDLDL_Ltsolve` combined (~7%) -- the two triangular-solve halves, run several
+   times per iteration (affine step, combined step, iterative refinement).
+4. `QdldlLdlt::factorize()` itself (3.9%) -- now just the T7.3 scatter loop plus the `QDLDL_factor`
+   call; confirms `twistedBy()` no longer shows up here at all.
+5. `sparse_selfadjoint_time_dense_product` (3.8%) -- the sparse-times-dense products
+   (`Pmul`/`A'z`/`Ax`), the largest remaining per-iteration Eigen-side cost after T7.1.
+A second, non-negligible cluster (AMD ordering, `SparsityMap`'s `std::map`-based slot registration,
+`Equilibration::compute()`, and most of the `malloc`/`free` still visible) is entirely `setup()`-
+time cost, inflated here because the driver calls `Solver::setup()` fresh for every one of the 100
+instances rather than reusing one `KktSystem` across timesteps via `updateData()` the way
+CardilloMPI actually would -- in that steady-state usage this cluster's share shrinks and the
+profile skews even further toward `QDLDL_factor`/solve. No further action taken here (a report
+deliverable per the task, not an implementation one); `T8.1`'s reduced contact KKT system is the
+next lever if `QDLDL_factor`'s dominant share itself needs cutting, not micro-tuning around it.
+
+No public-API changes: `Solver`/`Settings`/`Solution`/`ConeSpec` signatures are all unchanged.
+`ConeSet::margins()`'s signature change (`const Vec&` → `Eigen::Ref<const Vec>`) is the only
+public-header change in this phase, and `ConeSet` isn't part of what CardilloCxx integrates
+against (confirmed against `docs/migration-cardillocxx-phase0-3.md`'s addenda, which only ever
+mention `Solver`/`Settings`/`Info`) -- no migration-doc addendum needed this phase, and none added.
+
+Verified: all 85 tests pass (84 + the new `AllocFreeHotPath` test, which only registers under
+`-fsanitize=address`), clean under `-fsanitize=address,undefined` (tests + full benchmark binary).
+Benchmark suite: iteration counts unchanged on every instance from the pre-Phase-7 baseline, as
+expected for a behavior-neutral allocation/performance refactor.
+
 ---
 
 ## Phase 8 — Optional, needs maintainer sign-off

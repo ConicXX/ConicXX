@@ -37,8 +37,11 @@ class ConeSet {
   /// Hs * x where Hs is the block-diagonal aggregate scaling matrix.
   void mulHs(const Vec& x, Eigen::Ref<Vec> out) const;
 
-  /// Aggregate (min_margin, sum of positive margins) over all blocks.
-  std::pair<Scalar, Scalar> margins(const Vec& x) const;
+  /// Aggregate (min_margin, sum of positive margins) over all blocks. Takes an Eigen::Ref rather
+  /// than `const Vec&` so a caller holding an Eigen::Ref<Vec> itself (e.g. SolverImpl::
+  /// shiftToInteriorCold()) can forward it directly without materializing a temporary Vec copy
+  /// just to make the call (T7.1) -- a plain Vec binds here just as cheaply as it did before.
+  std::pair<Scalar, Scalar> margins(const Eigen::Ref<const Vec>& x) const;
 
   /// Minimum over all blocks of minSquaredEigenvalue(lambda restricted to that block) -- the
   /// step-length centrality safeguard's aggregate check (see Settings::centrality_theta).

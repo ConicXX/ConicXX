@@ -47,7 +47,7 @@ namespace conicxx::detail {
 /// (github.com/osqp/qdldl, the backend QOCO/Clarabel use), or RegularizedLdlt (a modified QDLDL
 /// numeric factorization loop with true per-pivot dynamic regularization, Davis/ECOS-style),
 /// selected once in setup() from Settings::linear_solver and dispatched through
-/// backendAnalyzePattern()/backendFactorize()/backendInfo()/backendVectorD()/
+/// backendAnalyzePattern()/backendFactorize()/backendInfo()/backendMinAbsD()/
 /// backendSolve() -- everything else in this class is written against those
 /// five calls and does not know which concrete backend is active.
 ///
@@ -158,8 +158,12 @@ class KktSystem {
   void backendAnalyzePattern(const SparseMat& K);
   void backendFactorize(const SparseMat& K);
   Eigen::ComputationInfo backendInfo() const;
-  Vec backendVectorD() const;
-  Vec backendSolve(const Vec& rhs) const;
+  /// min(|D_i|) over the current factorization -- the only aggregate tryFactorizeCurrentKFact()
+  /// ever needs, computed without materializing the full D vector as an owned Vec (T7.1; this
+  /// runs every IPM iteration).
+  Scalar backendMinAbsD() const;
+  /// Writes into `out` (already sized dim()) instead of allocating -- the hot-path form (T7.1).
+  void backendSolve(const Vec& rhs, Eigen::Ref<Vec> out) const;
 
   Index n_ = 0, m_ = 0;
 
@@ -173,6 +177,11 @@ class KktSystem {
   Scalar refine_reltol_ = 1e-13, refine_abstol_ = 1e-12, refine_stop_ratio_ = 5;
   Scalar last_refinement_residual_ = 0;
   bool equality_rank_deficient_ = false;
+
+  // Scratch buffers for solve()'s iterative-refinement loop, sized to dim() once in setup() and
+  // reused across calls (T7.1) instead of allocating a fresh residual/correction vector every
+  // refinement iteration -- solve() runs multiple times per IPM iteration.
+  Vec refine_r_, refine_dx_;
 
   SparsityMap sparsity_;
   SparseMat K_exact_;  // unregularized "true" matrix; iterative refinement always targets this
@@ -189,11 +198,19 @@ class KktSystem {
   // escalateAndResolve() continues bumping from here rather than restarting at 0.
   Scalar last_extra_p_ = 0, last_extra_nonneg_ = 0, last_extra_soc_ = 0, last_extra_zero_ = 0;
 
-  // Slot bookkeeping, in terms of (row, col) pairs kept alongside for
-  // robust value lookup via SparseMatrix::coeff() on updateData.
-  std::vector<Index> p_diag_slots_;                              // size n
-  std::vector<std::tuple<Index, Index, Index>> p_offdiag_slots_;  // (slot, row, col), row<col in P_upper
-  std::vector<std::tuple<Index, Index, Index>> a_slots_;          // (slot, row_in_A, col_in_A)
+  // Slot bookkeeping for writePAValues() (T7.2): rather than a (row, col) pair resolved via
+  // SparseMatrix::coeff() (an O(log nnz_col) search) on every updateData() call, each entry
+  // stores the index into the *input* matrix's own valuePtr() it corresponds to -- valid as long
+  // as the input's sparsity pattern still matches p_outer_ref_/p_inner_ref_ (checked before any
+  // of these are used), since a matching pattern's k-th stored value always occupies the same
+  // valuePtr() position as it did when this map was built in setup().
+  std::vector<Index> p_diag_slots_;  // size n; K slot for P_upper's (i, i)
+  // p_diag_value_idx_[i]: index into P_upper.valuePtr() for diagonal entry i, or -1 if P_upper
+  // doesn't store that diagonal entry at all (value implicitly 0, same as SparseMatrix::coeff()
+  // would report for an absent entry).
+  std::vector<Index> p_diag_value_idx_;
+  std::vector<std::pair<Index, Index>> p_offdiag_slots_;  // (K slot, index into P_upper.valuePtr())
+  std::vector<std::pair<Index, Index>> a_slots_;          // (K slot, index into A.valuePtr())
 
   // Diagonal slots bucketed by cone type, for rebuildKFactDiagonal()'s per-type static
   // regularization and the dynamic-regularization ladder's per-block bumping. Disjoint from each

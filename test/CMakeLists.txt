@@ -40,6 +40,7 @@ add_executable(conicxx_tests
   solver/test_solve_equality_robustness.cpp
   solver/test_infeasible.cpp
   solver/test_update_reuse.cpp
+  solver/test_alloc_free_hot_path.cpp
   version/test_version.cpp
 )
 

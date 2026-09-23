@@ -67,7 +67,19 @@ class SolverImpl {
   void addStep(Scalar alpha);
   void maybeRescale();
 
-  Vec Pmul(const Vec& v) const;  // P (symmetric, upper-stored) * v
+  /// P (symmetric, upper-stored) * v, written into `out` (already sized n_) instead of allocating
+  /// -- the hot-path form (T7.1); called several times per IPM iteration. Templated on `v`'s type
+  /// (rather than taking `const Vec&`) so a caller can pass a block/segment of another buffer
+  /// (e.g. kkt_sol_.head(n_)) directly, without an intermediate Vec copy just to call this.
+  template <typename Derived>
+  void Pmul(const Eigen::MatrixBase<Derived>& v, Eigen::Ref<Vec> out) const {
+    // .noalias() matters here, not just as an optimization hint: assigning a sparse*dense
+    // product to an Eigen::Ref without it takes Eigen's "assume aliasing" path, which allocates
+    // a full temporary Matrix to assign the product into before copying that into `out` --
+    // exactly the per-call heap allocation this method exists to avoid (T7.1). Safe: `out` is
+    // never part of `v` or of P_ at any call site.
+    out.noalias() = P_.selfadjointView<Eigen::Upper>() * v;
+  }
 
   // --- Phase 4 (T4.1/T4.2): termination and infeasibility, evaluated in unscaled (real-units)
   // quantities without ever reconstructing an unscaled P/A/q/b -- see docs/design.md
@@ -142,6 +154,11 @@ class SolverImpl {
   // --- warm start ---
   bool have_warm_start_ = false;
   Vec warm_x_, warm_s_, warm_z_;
+  // Trial copies recentered/compared against the cold start in solve() -- kept separate from
+  // warm_x_/warm_s_/warm_z_ (which must survive untouched across solve() calls whenever the cold
+  // start wins) but pre-sized once in setup() so this comparison allocates only on the first
+  // solve() call, not every one (T7.1).
+  Vec warm_x_trial_, warm_s_trial_, warm_z_trial_;
 
   // --- step-length safeguard state (T3.2) ---
   int consecutive_tiny_steps_ = 0;  ///< reset in solve(); see Status::InsufficientProgress
@@ -161,6 +178,48 @@ class SolverImpl {
   std::chrono::steady_clock::time_point solve_start_;
 
   Solution solution_;
+
+  // --- Scratch buffers for the per-IPM-iteration hot path (T7.1) ---
+  // All sized once in setup() (n_+m_, n_, or m_ as noted) and reused across every call within a
+  // solve(), and across every solve() call on the same instance, instead of allocating a fresh
+  // local Vec each time -- computeAffineStep()/computeCombinedStep() alone run this path twice
+  // per IPM iteration.
+
+  // KKT solve RHS/solution, shared by computeInitialPoint()/computeConstantSolve()/
+  // computeAffineStep()/computeCombinedStep() (size n_+m_).
+  Vec kkt_rhs_, kkt_sol_;
+
+  // Pmul() result and the xi/xi-x1 intermediates computeAffineStep()/computeCombinedStep() both
+  // need (size n_).
+  Vec Pmul_scratch_, xi_scratch_, xi_minus_x1_scratch_;
+
+  // Hs * dz_aff_ (resp. dz_) in computeAffineStep()/computeCombinedStep() (size m_).
+  Vec Hz_scratch_;
+
+  // A_.transpose() * z_ and A_ * x_ in computeResiduals() (size n_, m_) -- computed via .noalias()
+  // into these instead of inline in the rx_/rz_ expressions, since Eigen's sparse-times-dense
+  // product needs an explicit noalias() target to avoid materializing its own temporary (T7.1).
+  Vec Atz_scratch_, Ax_scratch_;
+
+  // computeCombinedStep()'s cone-algebra intermediates (size m_).
+  Vec dz_table_, lambda_, lambda_prod_, Winv_ds_aff_, W_dz_aff_, corrector_, ds_combined_,
+      lambda_inv_ds_, ds_const_;
+
+  // safeguardedStepLength()'s per-backtrack trial point (size m_) -- mutable since the method is
+  // const (the trial point is throwaway scratch, not part of the solver's actual state).
+  mutable Vec s_trial_, z_trial_, lambda_trial_;
+
+  // computeMetrics()'s infeasibility-residual intermediates (size n_, m_) -- mutable for the same
+  // reason (computeMetrics() is const).
+  mutable Vec rx_inf_, rz_inf_;
+
+  // solve()'s affine-only trial point, used just to compute mu_aff for the Mehrotra centering
+  // parameter sigma (size m_ each).
+  Vec s_aff_scratch_, z_aff_scratch_;
+
+  // finalizeSolution()'s unscaled-then-rescaled solution, before being copied into solution_
+  // (size n_, m_, m_).
+  Vec sol_x_scratch_, sol_s_scratch_, sol_z_scratch_;
 };
 
 }  // namespace conicxx::detail
