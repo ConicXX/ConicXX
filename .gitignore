@@ -5,3 +5,4 @@ cmake-build-*/
 *.a
 *.so
 compile_commands.json
+.claude/
