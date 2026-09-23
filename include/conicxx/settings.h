@@ -1,5 +1,7 @@
 #pragma once
 
+#include <limits>
+
 #include "conicxx/types.h"
 
 namespace conicxx {
@@ -58,12 +60,35 @@ struct RegularizationSettings {
 /// Solver configuration. A plain aggregate so it is cheap to copy and easy
 /// to construct with designated-initializer-style usage.
 struct Settings {
-  // --- Termination tolerances ---
-  Scalar tol_feas = 1e-8;      ///< tolerance on scaled primal/dual residual norms
+  // --- Termination tolerances (Phase 4, T4.1) ---
+  // Evaluated on unequilibrated (real-units) quantities -- see docs/design.md "Termination and
+  // infeasibility" for the exact formulas and how they're derived from the equilibrated
+  // internal representation without reconstructing an unscaled problem every iteration.
+  Scalar tol_feas = 1e-8;      ///< primal/dual feasibility residual tolerance (infinity norm)
   Scalar tol_gap_abs = 1e-8;   ///< absolute duality gap tolerance
   Scalar tol_gap_rel = 1e-8;   ///< relative duality gap tolerance
-  Scalar tol_infeas = 1e-7;    ///< tolerance for infeasibility certificate detection
+
+  /// kappa/tau must stay <= tol_ktratio.recip() * 1000 before infeasibility certificates are even
+  /// considered (matches Clarabel's actual gate; `Solved` itself uses a fixed kappa/tau <= 1.0
+  /// sanity bound, not tol_ktratio -- the task list's own paraphrase of this differs from
+  /// Clarabel's real behavior, resolved in Clarabel's favor, see docs/design.md).
+  Scalar tol_ktratio = 1e-6;
+
+  Scalar tol_infeas_abs = 1e-7;  ///< absolute part of the infeasibility-certificate tolerance
+  Scalar tol_infeas_rel = 1e-7;  ///< relative part (multiplies -b'z resp. -q'x)
+
   int max_iter = 200;
+  Scalar time_limit = std::numeric_limits<Scalar>::infinity();  ///< seconds; Status::MaxTime
+
+  /// "Almost" tolerances (T4.3): if the ordinary tolerances above aren't met but these looser
+  /// ones are, the best iterate seen so far is returned with an Almost* status instead of
+  /// MaxIterations/MaxTime/InsufficientProgress. Clarabel-like defaults.
+  Scalar reduced_tol_feas = 1e-4;
+  Scalar reduced_tol_gap_abs = 5e-5;
+  Scalar reduced_tol_gap_rel = 5e-5;
+  Scalar reduced_tol_infeas_abs = 5e-5;
+  Scalar reduced_tol_infeas_rel = 5e-5;
+  Scalar reduced_tol_ktratio = 1e-4;
 
   // --- KKT regularization (Vanderbei quasi-definite construction) ---
   RegularizationSettings regularization;

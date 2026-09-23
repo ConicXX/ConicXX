@@ -18,6 +18,14 @@ const char* toString(Status status) {
       return "NumericalError";
     case Status::InsufficientProgress:
       return "InsufficientProgress";
+    case Status::AlmostSolved:
+      return "AlmostSolved";
+    case Status::AlmostPrimalInfeasible:
+      return "AlmostPrimalInfeasible";
+    case Status::AlmostDualInfeasible:
+      return "AlmostDualInfeasible";
+    case Status::MaxTime:
+      return "MaxTime";
   }
   return "Unknown";
 }

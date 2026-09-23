@@ -16,10 +16,23 @@ enum class Status {
   /// The step-length safeguard (see Settings::centrality_theta/min_terminate_step_length)
   /// backtracked to a step below min_terminate_step_length for two consecutive iterations --
   /// returned instead of continuing to grind on iterations that aren't making real progress, or
-  /// silently accepting a step too close to the boundary to trust. Reports the current iterate
-  /// (full best-iterate tracking across the whole run is Phase 4/T4.3's job, not implemented
-  /// here -- see CONICXX_AGENT_TASKS.md).
+  /// silently accepting a step too close to the boundary to trust. Reports the best iterate seen
+  /// so far (T4.3's merit-function tracking, see Info::merit), or AlmostSolved if that iterate
+  /// meets the reduced tolerances.
   InsufficientProgress,
+
+  /// max_iter reached without meeting the ordinary tolerances, but the best iterate seen during
+  /// the run meets Settings::reduced_tol_*. Reports that best iterate, not the last one.
+  AlmostSolved,
+  /// Same idea as AlmostSolved, for a primal-infeasibility certificate that only meets the
+  /// reduced infeasibility tolerances.
+  AlmostPrimalInfeasible,
+  /// Same idea as AlmostSolved, for a dual-infeasibility certificate that only meets the reduced
+  /// infeasibility tolerances.
+  AlmostDualInfeasible,
+  /// Settings::time_limit was reached. Reports the best iterate seen so far, same as
+  /// MaxIterations/InsufficientProgress.
+  MaxTime,
 };
 
 const char* toString(Status status);
@@ -43,6 +56,11 @@ struct Info {
   /// equality constraints (rank-deficient A restricted to the zero-cone rows), not corrected or
   /// perturbed away silently.
   bool equality_rank_deficient = false;
+
+  /// max(primal_residual, dual_residual, |duality_gap|) at the reported iterate -- the merit
+  /// function T4.3 uses to pick the "best" iterate to report on MaxIterations/MaxTime/
+  /// InsufficientProgress. Lower is better; 0 only for an exactly converged point.
+  Scalar merit = 0;
 };
 
 struct Solution {

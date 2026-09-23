@@ -34,6 +34,7 @@ add_executable(conicxx_tests
   solver/test_solve_socp.cpp
   solver/test_solve_friction_qp_soc.cpp
   solver/test_solve_apex_contacts.cpp
+  solver/test_termination_unscaled.cpp
   solver/test_solve_dense_input.cpp
   solver/test_solve_equality_robustness.cpp
   solver/test_infeasible.cpp

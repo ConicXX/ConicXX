@@ -5,8 +5,10 @@ Written for: the CardilloCxx coding agent that integrates conicxx as a contact-s
 Scope: everything committed to conicxx between commit `784e5cd` ("Possibly found bug in custom
 ldlt decomposition", the last commit CardilloCxx was validated against) and the current `HEAD`
 (Phase 0 hygiene, Phase 1 structured cone scaling, Phase 2 per-cone regularization, Phase 3 SOC
-scaling + step-length safeguard). See `CONICXX_AGENT_TASKS.md` in this repo for the full task
-list and per-phase rationale/verification if you want more detail than this note gives.
+scaling + step-length safeguard, Phase 4 termination/infeasibility/statuses -- see the addendum at
+the end of this file for Phase 4 specifically, added after the rest of this note was first
+written). See `CONICXX_AGENT_TASKS.md` in this repo for the full task list and per-phase
+rationale/verification if you want more detail than this note gives.
 
 ## TL;DR
 
@@ -157,10 +159,79 @@ the way to catch anything relevant.
   Phase 1 went further in the same direction and it's worth checking whether that workaround is
   still needed).
 
-## 8. What did *not* change
+## 8. What did *not* change (through Phase 3; see the Phase 4 addendum below for one exception)
 
 - `conicxx::Solver`'s constructor, `setup()` (all four overloads), `updateData()`,
   `setWarmStart()`, `solve()`, `solution()`, `settings()`/`setSettings()`.
 - `ConeSpec` (`zero_dim`, `nonneg_dim`, `soc_dims`, `totalDim()`, `isValid()`).
-- `Solution::x/s/z/objective`, and all pre-existing `Info` fields.
+- `Solution::x/s/z/objective`.
 - `conicxx/convert.h`, `conicxx/types.h`.
+
+---
+
+## Addendum: Phase 4 (termination, infeasibility, statuses)
+
+Same TL;DR as before: `Solver`/`ConeSpec` still didn't change. What did:
+
+### `Settings` changes (compile-breaking if you set the removed field)
+
+| Old (gone) | New | Notes |
+|---|---|---|
+| `settings.tol_infeas` | `settings.tol_infeas_abs` **and** `.tol_infeas_rel` | both default 1e-7; used together now (`dot_bz < -tol_infeas_abs && res_primal_inf < -tol_infeas_rel*(-dot_bz)`, and symmetrically for dual) |
+
+New, additive fields: `tol_ktratio` (1e-6 -- gates when infeasibility certificates are considered,
+not `Solved` itself, see below), `time_limit` (default +infinity, seconds), and the `reduced_tol_*`
+family (`reduced_tol_feas`, `reduced_tol_gap_abs`, `reduced_tol_gap_rel`, `reduced_tol_infeas_abs`,
+`reduced_tol_infeas_rel`, `reduced_tol_ktratio`) used by the new `Almost*` statuses below.
+
+### `Status`: four new enumerators
+
+```cpp
+enum class Status {
+  ..., InsufficientProgress,  // from Phase 3
+  AlmostSolved, AlmostPrimalInfeasible, AlmostDualInfeasible, MaxTime,  // new, Phase 4
+};
+```
+
+Same action as before: add cases to any exhaustive `switch(status)`. `AlmostSolved` /
+`AlmostPrimalInfeasible` / `AlmostDualInfeasible` mean the solver hit `MaxIterations`/`MaxTime`/
+`InsufficientProgress` but the *best* iterate seen during the run (not necessarily the last one --
+see below) met the looser `reduced_tol_*` tolerances; the returned `Solution` is that best
+iterate. `MaxTime` means `Settings::time_limit` was reached (default is +infinity, i.e. this can
+never fire unless you set it).
+
+### `Info` changes: one field added, two fields' *meaning* changed (not their names/types)
+
+```cpp
+Scalar merit = 0;  // new: max(primal_residual, dual_residual, |duality_gap|) at the reported
+                    // iterate -- what MaxIterations/MaxTime/InsufficientProgress used to pick it
+```
+
+**`Info::primal_residual` and `Info::dual_residual` now mean something different**, even though
+the field names, types, and rough "smaller is better, should be near tol_feas at convergence"
+intuition are unchanged:
+- Before: `||Ax+s-tau*b||_2 / tau` and `||A'z+Px+tau*q||_2 / tau`, computed in conicxx's internal
+  *equilibrated* units (2-norm).
+- Now (T4.1): the same quantities but in real, unscaled problem units, using the infinity norm,
+  and normalized by `max(1, ||b||_inf + ||x||_inf + ||s||_inf)` (resp. the q/x/z analogue) --
+  matching Clarabel's actual convergence-check convention, not just a relabeling.
+
+**If CardilloCxx logs, thresholds, or compares these two `Info` fields against your own numbers**
+(e.g. cross-checking against QOCO's or Clarabel's own reported residuals for the same problem),
+expect the *numbers* to change even though nothing needs to change in your code for it to keep
+compiling -- they're now actually the same kind of quantity Clarabel itself reports for the same
+problem, which they weren't reliably before (see `docs/design.md`'s "Termination and
+infeasibility" for the exact formulas, including two places where this session's implementation
+deliberately deviates from a literal reading of Clarabel's Rust source, confirmed against the
+maintainer, and documented there in detail).
+
+### Behavioral note: the pre-Phase-4 duality-gap check had a real bug
+
+The relative-gap tolerance was checked against `max(|primal_obj|, |dual_obj|)` where it should
+have used `min(...)` (both the task's own spec and Clarabel's actual source agree on `min`). This
+made the relative-gap tolerance *harder* to satisfy than intended whenever primal and dual
+objective values differ noticeably during a solve -- fixed as part of Phase 4. Net effect on
+conicxx's own benchmark suite was iteration counts improving on most instances (fewer iterations
+needed now that the check isn't needlessly strict), one isolated instance needing one more
+iteration. Worth knowing if you've tuned anything (e.g. `max_iter`) around the old convergence
+behavior on your own scenes.

@@ -392,6 +392,44 @@ Return the normalized certificate in `Solution` (x, s, z scaled so that −bᵀz
 *Accept:* the existing `test_infeasible` cases pass. Add a near-infeasible friction case and a
 dual-infeasible case (unbounded LP) with certificate checks. No false certificates on any benchmark.
 
+**Done.** Fetched Clarabel's actual `info.rs`/`residuals.rs` (as instructed) before implementing --
+found two real deviations between the task's plain-English formulas and Clarabel's real behavior,
+confirmed with the maintainer, resolved in Clarabel's favor: `tol_ktratio` gates when
+infeasibility certificates are considered (`ktratio > 1000/tol_ktratio`), not `Solved` itself
+(which uses a fixed `ktratio <= 1.0`); the gap check is Clarabel's OR of two independent
+conditions, not the task's single additive one (both agree the relative-gap denominator is `min`,
+not `max` -- the pre-Phase-4 code used `max`, a real bug). Full derivation, and why one specific
+scaling factor (`Px`'s `cinv` term in the dual-infeasibility certificate) was implemented from a
+from-scratch derivation rather than the fetched Rust source, is in `docs/design.md`.
+
+T4.1/T4.2 implemented as `SolverImpl::computeMetrics()`: every termination/infeasibility quantity
+is obtained algebraically from the already-computed equilibrated residual cache and the
+equilibration weights (`d`/`e`/`c` and their inverses, always valid -- identity when
+`Settings::equilibrate` is off), never by reconstructing an unscaled `P`/`A`/`q`/`b`. Validated by
+`test/solver/test_termination_unscaled.cpp`, which reconstructs the residuals directly from the
+public API on a deliberately badly-scaled problem and checks they match -- this is the real
+safety net for the derivation, not just structural agreement with Clarabel's source. T4.3's best-
+iterate tracking (`updateBestIterate`/`restoreBestIterate`, merit = max(res_primal, res_dual,
+|gap|)) and the five new `Status` values are implemented; `reduced_tol_*` settings and
+`Settings::time_limit` added.
+
+`Settings::tol_infeas` (single field) replaced by `tol_infeas_abs`/`tol_infeas_rel` (matching
+Clarabel's actual pair, needed for T4.2's certificate formula); `Settings::tol_ktratio` added.
+`Status` gained `AlmostSolved`, `AlmostPrimalInfeasible`, `AlmostDualInfeasible`, `MaxTime`.
+`Info` gained `merit`. `Info::primal_residual`/`dual_residual` now report the T4.1 unscaled
+infinity-norm quantities instead of the old equilibrated 2-norm ones -- same field names,
+different (more correct) meaning; see `docs/migration-cardillocxx-phase0-3.md`'s Phase 4 addendum
+for what this means for CardilloCxx specifically.
+
+Verified: all 81 tests pass (3 new `Infeasible.*` certificate checks including the friction-cone
+near-infeasible case, plus the dedicated unscaling-validation test), clean under
+`-fsanitize=address,undefined` (tests + full benchmark binary). Benchmark suite: iteration counts
+improved on ~40 instances (the corrected termination formulas are measurably easier to satisfy
+where the old ones were needlessly strict, e.g. the `max`-vs-`min` gap bug) and got 1 iteration
+worse on exactly one (`Portfolio assets=120,factors=15`, trial 1: 14→15) -- an isolated, expected
+consequence of switching to a genuinely different (not just looser) termination criterion, not a
+systematic regression.
+
 ---
 
 ## Phase 5 — Warm start (ConicXX feature Clarabel lacks)

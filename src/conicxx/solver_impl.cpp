@@ -32,6 +32,9 @@ bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, con
 
   if (!kkt_.setup(P_, A_, *cones_, settings_)) return false;
 
+  cacheEquilibrationWeights();
+  cacheUnscaledDataNorms(/*b_changed=*/true, /*q_changed=*/true);
+
   x_ = Vec::Zero(n_);
   s_ = Vec::Zero(m_);
   z_ = Vec::Zero(m_);
@@ -87,6 +90,8 @@ bool SolverImpl::updateData(const SparseMat* P, const Vec* q, const SparseMat* A
   if (A) A_ = A_scaled;
   if (q) q_ = q_scaled;
   if (b) b_ = b_scaled;
+
+  cacheUnscaledDataNorms(b != nullptr, q != nullptr);
   return true;
 }
 
@@ -100,6 +105,39 @@ void SolverImpl::setWarmStart(const Vec& x, const Vec& s, const Vec& z) {
 }
 
 Vec SolverImpl::Pmul(const Vec& v) const { return P_.selfadjointView<Eigen::Upper>() * v; }
+
+void SolverImpl::cacheEquilibrationWeights() {
+  // Always valid regardless of settings_.equilibrate: d_eff_/e_eff_ are the real Ruiz weights
+  // when equilibration ran, or empty (meaning "identity", see weightedInfNorm) when it didn't --
+  // every call site goes through weightedInfNorm() so this is the only place that branches on
+  // settings_.equilibrate for this purpose.
+  if (settings_.equilibrate) {
+    d_eff_ = equil_.d();
+    e_eff_ = equil_.e();
+    dinv_eff_ = d_eff_.cwiseInverse();
+    einv_eff_ = e_eff_.cwiseInverse();
+    cinv_ = 1.0 / equil_.c();
+  } else {
+    d_eff_ = Vec();
+    e_eff_ = Vec();
+    dinv_eff_ = Vec();
+    einv_eff_ = Vec();
+    cinv_ = 1.0;
+  }
+}
+
+Scalar SolverImpl::weightedInfNorm(const Vec& v, const Vec& weights) {
+  if (v.size() == 0) return 0.0;
+  if (weights.size() == 0) return v.cwiseAbs().maxCoeff();  // equilibrate == false: identity
+  return (v.array() * weights.array()).abs().maxCoeff();
+}
+
+void SolverImpl::cacheUnscaledDataNorms(bool b_changed, bool q_changed) {
+  // ||b||_inf = ||E^-1 b_hat||_inf (b_ is b_hat, the stored equilibrated value -- see
+  // equilibration.h: b_hat = E*b). ||q||_inf = ||(1/c) D^-1 q_hat||_inf likewise.
+  if (b_changed) normb_ = weightedInfNorm(b_, einv_eff_);
+  if (q_changed) normq_ = cinv_ * weightedInfNorm(q_, dinv_eff_);
+}
 
 void SolverImpl::shiftToInteriorCold(Eigen::Ref<Vec> v) const {
   const auto [min_margin, pos_margin] = cones_->margins(v);
@@ -371,35 +409,107 @@ void SolverImpl::maybeRescale() {
   }
 }
 
-bool SolverImpl::checkConvergence(Scalar norm_rx, Scalar norm_rz, Scalar primal_obj,
-                                  Scalar dual_obj) const {
-  const Scalar gap_abs = std::abs(primal_obj - dual_obj);
-  const Scalar gap_tol = settings_.tol_gap_abs +
-                          settings_.tol_gap_rel * std::max(std::abs(primal_obj), std::abs(dual_obj));
-  return norm_rx < settings_.tol_feas && norm_rz < settings_.tol_feas && gap_abs < gap_tol &&
-         tau_ > 1e-6;
+SolverImpl::Metrics SolverImpl::computeMetrics() const {
+  Metrics m;
+  const Scalar tinv = 1.0 / tau_;
+
+  // "Direct" (not tau-normalized) unscaled norms: the infeasibility certificates (T4.2) evaluate
+  // the homogeneous x_/z_/s_ themselves, not x_/tau_ etc. -- a certificate is meaningful exactly
+  // when tau -> 0, where dividing by tau would blow up for no reason.
+  const Scalar normx_direct = weightedInfNorm(x_, d_eff_);
+  const Scalar normz_direct = cinv_ * weightedInfNorm(z_, e_eff_);
+  const Scalar norms_direct = weightedInfNorm(s_, einv_eff_);
+
+  // tau-normalized versions, for the ordinary feasibility residuals (T4.1): x_hat = x/tau etc.
+  const Scalar normx = normx_direct * tinv;
+  const Scalar normz = normz_direct * tinv;
+  const Scalar norms = norms_direct * tinv;
+
+  m.res_dual = cinv_ * weightedInfNorm(rx_, dinv_eff_) * tinv /
+               std::max(Scalar(1.0), normq_ + normx + normz);
+  m.res_primal =
+      weightedInfNorm(rz_, einv_eff_) * tinv / std::max(Scalar(1.0), normb_ + normx + norms);
+
+  const Scalar xPx_tinvsq_over2 = dot_xPx_ * tinv * tinv * 0.5;
+  m.cost_primal = cinv_ * (dot_qx_ * tinv + xPx_tinvsq_over2);
+  m.cost_dual = cinv_ * (-dot_bz_ * tinv - xPx_tinvsq_over2);
+  m.gap_abs = std::abs(m.cost_primal - m.cost_dual);
+  m.gap_rel = m.gap_abs / std::max(Scalar(1.0),
+                                   std::min(std::abs(m.cost_primal), std::abs(m.cost_dual)));
+
+  m.ktratio = kappa_ * tinv;  // scale-invariant: no d/e/c weighting applies to kappa/tau at all
+
+  // rx_inf = -A'z = rx_ + Px_ + tau*q_ (since rx_ = -(A'z + Px + tau*q));
+  // rz_inf =  Ax+s = rz_ + tau*b_      (since rz_ =  Ax + s - tau*b).
+  const Vec rx_inf = rx_ + Px_ + tau_ * q_;
+  const Vec rz_inf = rz_ + tau_ * b_;
+  m.res_primal_inf =
+      cinv_ * weightedInfNorm(rx_inf, dinv_eff_) / std::max(Scalar(1.0), normz_direct);
+  m.res_dual_inf = std::max(
+      cinv_ * weightedInfNorm(Px_, dinv_eff_) / std::max(Scalar(1.0), normx_direct),
+      weightedInfNorm(rz_inf, einv_eff_) / std::max(Scalar(1.0), normx_direct + norms_direct));
+
+  m.dot_bz = cinv_ * dot_bz_;
+  m.dot_qx = cinv_ * dot_qx_;
+
+  m.merit = std::max({m.res_primal, m.res_dual, std::abs(m.gap_abs)});
+  return m;
 }
 
-bool SolverImpl::checkInfeasibility() {
-  const Scalar ratio = tau_ / std::max(kappa_, Scalar(1e-30));
-  if (ratio > settings_.tol_infeas) return false;
-
-  if (dot_bz_ < -settings_.tol_infeas * std::max(Scalar(1.0), z_.norm())) {
-    solution_.status = Status::PrimalInfeasible;
-    return true;
-  }
-  if (dot_qx_ < -settings_.tol_infeas * std::max(Scalar(1.0), x_.norm())) {
-    solution_.status = Status::DualInfeasible;
-    return true;
-  }
-  return false;
+bool SolverImpl::isSolved(const Metrics& m, Scalar tol_feas, Scalar tol_gap_abs,
+                          Scalar tol_gap_rel) const {
+  const bool gap_ok = (m.gap_abs < tol_gap_abs) || (m.gap_rel < tol_gap_rel);
+  return m.ktratio <= 1.0 && gap_ok && m.res_primal < tol_feas && m.res_dual < tol_feas;
 }
 
-void SolverImpl::finalizeSolution(bool /*converged*/) {
-  const bool infeasible =
-      (solution_.status == Status::PrimalInfeasible || solution_.status == Status::DualInfeasible);
-  const Scalar scale =
-      infeasible ? Scalar(1.0) / std::max(kappa_, Scalar(1e-30)) : Scalar(1.0) / std::max(tau_, Scalar(1e-30));
+bool SolverImpl::isPrimalInfeasible(const Metrics& m, Scalar tol_infeas_abs,
+                                    Scalar tol_infeas_rel) const {
+  return m.dot_bz < -tol_infeas_abs && m.res_primal_inf < -tol_infeas_rel * m.dot_bz;
+}
+
+bool SolverImpl::isDualInfeasible(const Metrics& m, Scalar tol_infeas_abs,
+                                  Scalar tol_infeas_rel) const {
+  return m.dot_qx < -tol_infeas_abs && m.res_dual_inf < -tol_infeas_rel * m.dot_qx;
+}
+
+void SolverImpl::updateBestIterate(const Metrics& m) {
+  if (!have_best_ || m.merit < best_merit_) {
+    best_x_ = x_;
+    best_s_ = s_;
+    best_z_ = z_;
+    best_tau_ = tau_;
+    best_kappa_ = kappa_;
+    best_merit_ = m.merit;
+    best_metrics_ = m;
+    best_mu_ = computeMu();
+    have_best_ = true;
+  }
+}
+
+void SolverImpl::restoreBestIterate() {
+  if (!have_best_) return;
+  x_ = best_x_;
+  s_ = best_s_;
+  z_ = best_z_;
+  tau_ = best_tau_;
+  kappa_ = best_kappa_;
+}
+
+void SolverImpl::finalizeSolution(Status status, const Metrics& m, Scalar mu) {
+  const bool primal_inf =
+      (status == Status::PrimalInfeasible || status == Status::AlmostPrimalInfeasible);
+  const bool dual_inf = (status == Status::DualInfeasible || status == Status::AlmostDualInfeasible);
+
+  // Normalize infeasibility certificates so -b'z == 1 (resp. -q'x == 1) exactly, as required by
+  // T4.2, rather than the ordinary 1/tau (resp. 1/kappa) scale used for an actual solution.
+  Scalar scale;
+  if (primal_inf) {
+    scale = -1.0 / (cinv_ * dot_bz_);
+  } else if (dual_inf) {
+    scale = -1.0 / (cinv_ * dot_qx_);
+  } else {
+    scale = 1.0 / std::max(tau_, Scalar(1e-30));
+  }
 
   Vec x_out = x_ * scale, s_out = s_ * scale, z_out = z_ * scale;
   if (settings_.equilibrate) equil_.unscaleSolution(x_out, s_out, z_out);
@@ -407,24 +517,22 @@ void SolverImpl::finalizeSolution(bool /*converged*/) {
   solution_.x = x_out;
   solution_.s = s_out;
   solution_.z = z_out;
+  solution_.objective = m.cost_primal;
 
-  Scalar primal_obj = (0.5 * dot_xPx_ / tau_ + dot_qx_) / tau_;
-  if (settings_.equilibrate) primal_obj = equil_.unscaleObjective(primal_obj);
-  solution_.objective = primal_obj;
-
-  Scalar gap = dot_sz_ / (tau_ * tau_);
-  if (settings_.equilibrate) gap = equil_.unscaleObjective(gap);
-  solution_.info.duality_gap = gap;
-  solution_.info.primal_residual = rz_.norm() / std::max(tau_, Scalar(1e-30));
-  solution_.info.dual_residual = rx_.norm() / std::max(tau_, Scalar(1e-30));
-  solution_.info.mu = computeMu();
+  solution_.info.duality_gap = m.gap_abs;
+  solution_.info.primal_residual = m.res_primal;
+  solution_.info.dual_residual = m.res_dual;
+  solution_.info.mu = mu;
   solution_.info.kkt_refinement_residual = kkt_.lastRefinementResidual();
   solution_.info.equality_rank_deficient = kkt_.equalityRankDeficient();
+  solution_.info.merit = m.merit;
 }
 
 const Solution& SolverImpl::solve() {
   solution_ = Solution{};
   consecutive_tiny_steps_ = 0;
+  have_best_ = false;
+  solve_start_ = std::chrono::steady_clock::now();
   if (!setup_done_) {
     solution_.status = Status::NumericalError;
     return solution_;
@@ -442,12 +550,19 @@ const Solution& SolverImpl::solve() {
     ensureStrictlyInteriorWarm(z_);
   } else if (!computeInitialPoint()) {
     solution_.status = Status::NumericalError;
-    finalizeSolution(false);
+    solution_.info.iterations = 0;
+    computeResiduals();
+    finalizeSolution(Status::NumericalError, computeMetrics(), computeMu());
     return solution_;
   }
 
   Status final_status = Status::MaxIterations;
   int iterations = 0;
+
+  // kappa/tau must clear this before infeasibility certificates are even considered -- matches
+  // Clarabel's actual gate (docs/design.md "Termination and infeasibility" explains why this
+  // deviates from the task list's own plain-English paraphrase, resolved in Clarabel's favor).
+  const Scalar infeas_ktratio_gate = (1.0 / settings_.tol_ktratio) * 1000.0;
 
   for (int iter = 0; iter < settings_.max_iter; ++iter) {
     iterations = iter + 1;
@@ -458,18 +573,29 @@ const Solution& SolverImpl::solve() {
     }
     computeResiduals();
 
+    const Metrics m = computeMetrics();
     const Scalar mu = computeMu();
-    const Scalar norm_rx = rx_.norm() / tau_;
-    const Scalar norm_rz = rz_.norm() / tau_;
-    const Scalar primal_obj = (0.5 * dot_xPx_ / tau_ + dot_qx_) / tau_;
-    const Scalar dual_obj = (-0.5 * dot_xPx_ / tau_ - dot_bz_) / tau_;
+    updateBestIterate(m);
 
-    if (checkConvergence(norm_rx, norm_rz, primal_obj, dual_obj)) {
+    if (isSolved(m, settings_.tol_feas, settings_.tol_gap_abs, settings_.tol_gap_rel)) {
       final_status = Status::Solved;
       break;
     }
-    if (checkInfeasibility()) {
-      final_status = solution_.status;
+    if (m.ktratio > infeas_ktratio_gate) {
+      if (isPrimalInfeasible(m, settings_.tol_infeas_abs, settings_.tol_infeas_rel)) {
+        final_status = Status::PrimalInfeasible;
+        break;
+      }
+      if (isDualInfeasible(m, settings_.tol_infeas_abs, settings_.tol_infeas_rel)) {
+        final_status = Status::DualInfeasible;
+        break;
+      }
+    }
+
+    const double elapsed_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count();
+    if (elapsed_s > settings_.time_limit) {
+      final_status = Status::MaxTime;
       break;
     }
 
@@ -525,9 +651,47 @@ const Solution& SolverImpl::solve() {
     maybeRescale();
   }
 
+  // For statuses that report the best iterate seen (not the last one), restore it and its
+  // cached metrics now, and check whether it actually meets the reduced ("almost") tolerances --
+  // if so, upgrade to the matching Almost* status (T4.3).
+  Metrics final_metrics;
+  Scalar final_mu;
+  if (final_status == Status::MaxIterations || final_status == Status::MaxTime ||
+      final_status == Status::InsufficientProgress) {
+    if (have_best_) {
+      restoreBestIterate();
+      final_metrics = best_metrics_;
+      final_mu = best_mu_;
+      if (isSolved(final_metrics, settings_.reduced_tol_feas, settings_.reduced_tol_gap_abs,
+                   settings_.reduced_tol_gap_rel)) {
+        final_status = Status::AlmostSolved;
+      } else if (final_metrics.ktratio > (1.0 / settings_.reduced_tol_ktratio) * 1000.0) {
+        if (isPrimalInfeasible(final_metrics, settings_.reduced_tol_infeas_abs,
+                               settings_.reduced_tol_infeas_rel)) {
+          final_status = Status::AlmostPrimalInfeasible;
+        } else if (isDualInfeasible(final_metrics, settings_.reduced_tol_infeas_abs,
+                                    settings_.reduced_tol_infeas_rel)) {
+          final_status = Status::AlmostDualInfeasible;
+        }
+      }
+    } else {
+      // Shouldn't normally happen (the loop always calls updateBestIterate() before any break),
+      // but fall back to whatever the current (possibly stale, e.g. pre-first-iteration) state
+      // implies rather than leaving Metrics default/zero-initialized.
+      final_metrics = computeMetrics();
+      final_mu = computeMu();
+    }
+  } else {
+    // Solved / PrimalInfeasible / DualInfeasible / NumericalError: x_/s_/z_/tau_/kappa_ are
+    // exactly the point computeResiduals() last measured (no step taken since), so this is
+    // consistent, not stale.
+    final_metrics = computeMetrics();
+    final_mu = computeMu();
+  }
+
   solution_.status = final_status;
   solution_.info.iterations = iterations;
-  finalizeSolution(final_status == Status::Solved);
+  finalizeSolution(final_status, final_metrics, final_mu);
 
   if (final_status == Status::Solved && settings_.warm_start) {
     warm_x_ = x_;

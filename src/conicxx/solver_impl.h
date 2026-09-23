@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <memory>
 
 #include "conicxx/cone_spec.h"
@@ -60,10 +61,47 @@ class SolverImpl {
 
   Vec Pmul(const Vec& v) const;  // P (symmetric, upper-stored) * v
 
-  bool checkConvergence(Scalar norm_rx, Scalar norm_rz, Scalar primal_obj, Scalar dual_obj) const;
-  bool checkInfeasibility();
+  // --- Phase 4 (T4.1/T4.2): termination and infeasibility, evaluated in unscaled (real-units)
+  // quantities without ever reconstructing an unscaled P/A/q/b -- see docs/design.md
+  // "Termination and infeasibility" for the derivation from the equilibrated internal
+  // representation (x_, s_, z_, rx_, rz_, Px_, dot_qx_, dot_bz_, dot_xPx_ etc. are all in
+  // equilibrated/"hat" units; every formula below algebraically undoes that, verified against a
+  // genuinely-reconstructed unscaled problem in test/solver/test_termination_unscaled.cpp).
 
-  void finalizeSolution(bool converged);
+  /// Caches the always-valid (identity if !settings_.equilibrate) equilibration weight vectors
+  /// and the unscaled ||b||_inf / ||q||_inf norms. Called from setup() and whenever updateData()
+  /// changes b or q.
+  void cacheEquilibrationWeights();
+  void cacheUnscaledDataNorms(bool b_changed, bool q_changed);
+
+  /// max_i |weights_i * v_i| (a no-op abs-max if weights is empty, i.e. equilibrate == false).
+  static Scalar weightedInfNorm(const Vec& v, const Vec& weights);
+
+  struct Metrics {
+    Scalar res_primal = 0, res_dual = 0;      // unscaled, tau-normalized, T4.1
+    Scalar gap_abs = 0, gap_rel = 0;          // unscaled; gap_rel uses min(|cost_primal|,|cost_dual|)
+    Scalar cost_primal = 0, cost_dual = 0;    // unscaled
+    Scalar ktratio = 0;                       // kappa/tau (scale-invariant, no unscaling needed)
+    Scalar res_primal_inf = 0, res_dual_inf = 0;  // unscaled, NOT tau-normalized, T4.2
+    Scalar dot_bz = 0, dot_qx = 0;            // unscaled, for the infeasibility certificate value
+    Scalar merit = 0;                         // max(res_primal, res_dual, |gap_abs|), T4.3
+  };
+  /// Computes every unscaled metric from the current iterate (x_, s_, z_, tau_, kappa_) and the
+  /// residual cache (computeResiduals() must have been called first this iteration).
+  Metrics computeMetrics() const;
+
+  bool isSolved(const Metrics& m, Scalar tol_feas, Scalar tol_gap_abs, Scalar tol_gap_rel) const;
+  bool isPrimalInfeasible(const Metrics& m, Scalar tol_infeas_abs, Scalar tol_infeas_rel) const;
+  bool isDualInfeasible(const Metrics& m, Scalar tol_infeas_abs, Scalar tol_infeas_rel) const;
+
+  /// Snapshots (x_, s_, z_, tau_, kappa_, metrics) as the best iterate if m.merit improves on
+  /// best_merit_. T4.3.
+  void updateBestIterate(const Metrics& m);
+  /// Restores the best snapshot into (x_, s_, z_, tau_, kappa_) -- used before finalizeSolution()
+  /// on MaxIterations/MaxTime/InsufficientProgress.
+  void restoreBestIterate();
+
+  void finalizeSolution(Status status, const Metrics& m, Scalar mu);
 
   // --- problem data (equilibrated in place if enabled) ---
   SparseMat P_, A_;
@@ -99,6 +137,20 @@ class SolverImpl {
 
   // --- step-length safeguard state (T3.2) ---
   int consecutive_tiny_steps_ = 0;  ///< reset in solve(); see Status::InsufficientProgress
+
+  // --- equilibration weights, always valid regardless of settings_.equilibrate (T4.1) ---
+  Vec d_eff_, e_eff_, dinv_eff_, einv_eff_;  // size n, m, n, m respectively
+  Scalar cinv_ = 1.0;
+  Scalar normb_ = 0, normq_ = 0;  // unscaled ||b||_inf, ||q||_inf; cached, recomputed on data change
+
+  // --- best-iterate tracking (T4.3) ---
+  Vec best_x_, best_s_, best_z_;
+  Scalar best_tau_ = 0, best_kappa_ = 0;
+  Scalar best_merit_ = 0, best_mu_ = 0;
+  Metrics best_metrics_;
+  bool have_best_ = false;
+
+  std::chrono::steady_clock::time_point solve_start_;
 
   Solution solution_;
 };
