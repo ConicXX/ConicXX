@@ -61,9 +61,11 @@ throwaway `main()`, the way it was used to diagnose the domino-scene report. Add
 test, or a `tools/compare_backends` CLI that loads a P/A/q/b/cone dump from disk, so it doesn't
 bit-rot silently.
 
-**T0.2 License.** No LICENSE file exists. `src/conicxx/kkt/regularized_ldlt.cpp` is derived from
-QDLDL (Apache-2.0) and needs attribution. Ask the maintainer which license to use. Add `LICENSE`
-and a `NOTICE`/third-party section crediting QDLDL.
+**T0.2 ~~License.~~ Resolved.** GPL-3.0 (matches CardilloCxx, the primary downstream consumer;
+plain GPL over LGPL since static linking is the intended embedding pattern and no non-GPL
+consumer is known). `LICENSE` (verbatim GPL-3.0 text) and `NOTICE` (crediting QDLDL, Apache-2.0,
+both the unmodified link and the adapted numeric loop in `regularized_ldlt.cpp`) added, plus a
+README section pointing at both.
 
 **T0.3 Remove local tooling files.** Delete `.claude/settings.json` (contains local absolute
 paths) and add `.claude/` to `.gitignore`.

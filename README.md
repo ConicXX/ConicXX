@@ -175,3 +175,8 @@ real algorithmic difference, not sampling noise.
 - Clarabel: https://arxiv.org/abs/2405.12762
 - QOCO: https://arxiv.org/abs/2503.12658
 - IPM slides with self-dual homogeneous embedding (as in Clarabel): https://www.syscop.de/files/2015ss/numopt/TEMPO_NOC_ECOS.pdf
+
+## License
+
+GPL-3.0, see [LICENSE](LICENSE). See [NOTICE](NOTICE) for third-party attributions
+(conicxx links QDLDL, Apache-2.0, and one file adapts part of it).

@@ -1,0 +1,41 @@
+ConicXX is licensed under the GNU General Public License v3.0 (see LICENSE).
+
+It links against and, in one file, adapts third-party code licensed under the
+Apache License, Version 2.0:
+
+--------------------------------------------------------------------------------
+
+QDLDL (https://github.com/osqp/qdldl)
+
+  Copyright 2018, Paul Goulart, Bartolomeo Stellato, Goran Banjac,
+  Ian McInerney, The OSQP developers
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+conicxx links against QDLDL unmodified (src/conicxx/kkt/qdldl_ldlt.cpp) when
+built with CONICXX_WITH_QDLDL=ON (the default; fetched via CMake FetchContent,
+see CMakeLists.txt).
+
+src/conicxx/kkt/regularized_ldlt.cpp additionally reuses QDLDL's elimination-
+tree/triangular-solve routines unmodified and adapts QDLDL_factor's numeric
+factorization loop (inserting per-pivot dynamic regularization in place of the
+original's abort-on-zero-pivot behavior); see the license header at the top of
+that file for the specific attribution and description of the modification.
+
+--------------------------------------------------------------------------------
+
+conicxx also depends on Eigen (https://eigen.tuxfamily.org), licensed under
+the Mozilla Public License 2.0, and on GoogleTest
+(https://github.com/google/googletest, test-only, not distributed with the
+library), licensed under the BSD 3-Clause License. Neither is modified or
+redistributed by this project; see their own repositories for license texts.
