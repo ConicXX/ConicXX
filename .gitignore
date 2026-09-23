@@ -6,3 +6,5 @@ cmake-build-*/
 *.so
 compile_commands.json
 .claude/
+bench_baseline.txt
+bench_after.txt
