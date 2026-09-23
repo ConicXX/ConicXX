@@ -29,7 +29,11 @@ namespace conicxx::detail {
 /// slots only, since registering the full triangle there would explicitly
 /// store an always-zero off-diagonal block in K's sparsity pattern, which
 /// is catastrophic for fill-in/factorization cost when such a block is
-/// large (e.g. a big equality/Zero-cone block).
+/// large (e.g. a big equality/Zero-cone block). The numeric values themselves
+/// come from each ConeBase's own writeHsLowerTriangle() (see cone_base.h) --
+/// no dense dim() x dim() Hs matrix is ever materialized for Zero/Nonnegative,
+/// which is what made a large block catastrophic for memory too, not just
+/// fill-in.
 ///
 /// `setup()` performs the one-time triplet-based assembly and a single
 /// `analyzePattern()` call. Two update paths reuse that pattern without any
@@ -154,12 +158,20 @@ class KktSystem {
   std::vector<std::tuple<Index, Index, Index>> a_slots_;          // (slot, row_in_A, col_in_A)
 
   struct HsBlockSlots {
-    Index z_offset = 0;  // offset of this cone block within z-space [0, m)
-    Index dim = 0;
-    // (slot, a, b) for a >= b (lower-triangular within the block, incl. diag)
-    std::vector<std::tuple<Index, Index, Index>> slots;
+    // Flat slot ids, in the same row-major lower-triangle order (a = 0..dim-1, b = 0..a) that
+    // ConeBase::writeHsLowerTriangle() writes values in -- diagonal-only for Zero/Nonnegative.
+    std::vector<Index> slots;
+    // Positions within `slots` (not slot ids) that are on-diagonal, i.e. all of them for
+    // Zero/Nonnegative, or every triangular-number position for SecondOrder. Used both to add
+    // static_reg_a_ when filling from the cone (updateScalingAndFactorize()) and to find the
+    // diagonal slots for a dynamic-regularization bump (writeRegularizedDiagonal()).
+    std::vector<Index> diag_positions;
   };
   std::vector<HsBlockSlots> hs_blocks_;
+  // Scratch buffer for one block's Hs entries, sized once in setup() to the largest block's
+  // numHsEntries() and reused (via .head()) across blocks/iterations to avoid a per-iteration
+  // heap allocation in updateScalingAndFactorize().
+  Vec hs_entries_scratch_;
 
   // Structural fingerprints from setup(), used to validate updateData() inputs.
   std::vector<Index> p_outer_ref_, p_inner_ref_;

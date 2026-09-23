@@ -2,7 +2,7 @@
 
 namespace conicxx {
 
-ZeroCone::ZeroCone(Index dim) : ConeBase(dim), e_(Vec::Zero(dim)), Hs_(Mat::Zero(dim, dim)) {}
+ZeroCone::ZeroCone(Index dim) : ConeBase(dim), e_(Vec::Zero(dim)) {}
 
 void ZeroCone::product(const Eigen::Ref<const Vec>&, const Eigen::Ref<const Vec>&,
                         Eigen::Ref<Vec> out) const {

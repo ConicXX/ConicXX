@@ -43,7 +43,11 @@ class SecondOrderCone final : public ConeBase {
   void applyW(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const override;
   void applyWInv(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const override;
 
-  const Mat& scalingBlock() const override { return Hs_; }
+  void mulHs(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const override {
+    out.noalias() = Hs_ * x;
+  }
+  Index numHsEntries() const override { return dim_ * (dim_ + 1) / 2; }
+  void writeHsLowerTriangle(Eigen::Ref<Vec> out) const override;
 
   Scalar margin(const Eigen::Ref<const Vec>& x) const override;
 

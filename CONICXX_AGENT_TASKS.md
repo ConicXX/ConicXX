@@ -107,6 +107,24 @@ longer take `Mat` blocks.
 be numerically neutral). `FrictionChainXL contacts=264` time per iteration drops by at least
 50×. Peak RSS for 264 contacts stays below 200 MB (measure with `/usr/bin/time -v`).
 
+**Done.** `ConeBase::scalingBlock()` replaced with `mulHs()`/`numHsEntries()`/
+`writeHsLowerTriangle()`; `ZeroCone`/`NonnegativeCone` no longer store a dense `dim x dim` `Mat`
+at all (`ZeroCone` stores nothing, `NonnegativeCone` keeps only its existing `w_` vector).
+`SecondOrderCone` keeps its dense `W_`/`Hs_` internally (dim is always small there; rewriting its
+NT-scaling math is Phase 3's job, not touched here). `ConeSet::scaling_blocks_` and
+`scalingBlocks()` removed; `KktSystem` fills K's (2,2) block by asking each cone to write its
+entries directly (via a reusable scratch buffer, no per-iteration heap allocation) instead of
+copying/reading a dense matrix.
+
+Verified: all 69 tests pass (3 new: per-cone `writeHsLowerTriangle`-vs-`mulHs` cross-checks,
+satisfying the "structured == dense" test from Section 9), clean under
+`-fsanitize=address,undefined` (tests + full benchmark binary). Benchmark suite: iteration
+counts, statuses and residuals bit-for-bit identical to `bench_baseline.txt` (only timing
+changed) -- confirms the change is numerically neutral, not just "still converges."
+`FrictionChainXL contacts=264`: ~553ms/iter -> ~8.5ms/iter (~65x, exceeds the 50x target). Peak
+RSS across the whole benchmark suite (including `contacts=264`): 26.4 MB (`/usr/bin/time -v`),
+far below the 200 MB target and the ~3 GB the dense zero-cone block previously needed alone.
+
 ---
 
 ## Phase 2 — Per-cone regularization; never perturb equalities

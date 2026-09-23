@@ -55,8 +55,26 @@ class ConeBase {
   virtual void applyW(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const = 0;
   virtual void applyWInv(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const = 0;
 
-  /// Dense Hs = W^T W block contributed to the (2,2) KKT block, dim() x dim().
-  virtual const Mat& scalingBlock() const = 0;
+  /// Hs * x, where Hs = W^T W is this cone's (dim() x dim()) NT-scaling block -- computed
+  /// structurally per cone type (Zero: identically 0; Nonnegative: diag(w)^2 elementwise;
+  /// SecondOrder: dense matvec against a cached block, fine since this cone type's dim() is
+  /// always small for the intended application). No dense dim() x dim() matrix is ever
+  /// materialized for Zero/Nonnegative, whose Hs is zero/diagonal -- storing one explicitly is
+  /// what made a large equality or nonnegative block (thousands of rows) catastrophic for both
+  /// memory and per-iteration cost.
+  virtual void mulHs(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const = 0;
+
+  /// Number of (row, col) entries this cone contributes to Hs's lower triangle in the KKT
+  /// matrix: dim() for Zero/Nonnegative (Hs is zero/diagonal, so only the diagonal needs a slot),
+  /// or dim()*(dim()+1)/2 for SecondOrder (Hs is genuinely dense). Must agree with the
+  /// enumeration order writeHsLowerTriangle() writes in.
+  virtual Index numHsEntries() const = 0;
+
+  /// Writes this cone's Hs lower-triangle entries into `out` (size numHsEntries()), in row-major
+  /// lower-triangle order (a = 0..dim()-1, b = 0..a; degenerates to just the diagonal for
+  /// Zero/Nonnegative). Plain Hs values -- not negated, not regularized; KktSystem applies the
+  /// KKT (2,2) block's sign and regularization uniformly across cone types.
+  virtual void writeHsLowerTriangle(Eigen::Ref<Vec> out) const = 0;
 
   /// Distance-to-boundary style measure of x within this cone; used to build
   /// a strictly-interior starting point. +infinity for the Zero cone (always

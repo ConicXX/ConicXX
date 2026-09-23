@@ -37,9 +37,6 @@ class ConeSet {
   /// Hs * x where Hs is the block-diagonal aggregate scaling matrix.
   void mulHs(const Vec& x, Eigen::Ref<Vec> out) const;
 
-  /// Per-block dense Hs matrices, in block order, for KKT assembly.
-  const std::vector<Mat>& scalingBlocks() const { return scaling_blocks_; }
-
   /// Aggregate (min_margin, sum of positive margins) over all blocks.
   std::pair<Scalar, Scalar> margins(const Vec& x) const;
 
@@ -58,7 +55,6 @@ class ConeSet {
  private:
   std::vector<std::unique_ptr<ConeBase>> cones_;
   std::vector<Index> offsets_;
-  std::vector<Mat> scaling_blocks_;
   Index total_dim_ = 0;
   Index degree_ = 0;
   Vec identity_;

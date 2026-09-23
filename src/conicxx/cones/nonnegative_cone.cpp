@@ -7,7 +7,7 @@
 namespace conicxx {
 
 NonnegativeCone::NonnegativeCone(Index dim)
-    : ConeBase(dim), e_(Vec::Ones(dim)), w_(Vec::Ones(dim)), Hs_(Mat::Identity(dim, dim)) {}
+    : ConeBase(dim), e_(Vec::Ones(dim)), w_(Vec::Ones(dim)) {}
 
 void NonnegativeCone::product(const Eigen::Ref<const Vec>& u, const Eigen::Ref<const Vec>& v,
                                Eigen::Ref<Vec> out) const {
@@ -22,7 +22,6 @@ void NonnegativeCone::inverseProduct(const Eigen::Ref<const Vec>& u,
 void NonnegativeCone::updateScaling(const Eigen::Ref<const Vec>& s,
                                      const Eigen::Ref<const Vec>& z) {
   w_.array() = (s.array() / z.array()).sqrt();
-  Hs_.diagonal().array() = w_.array().square();
 }
 
 void NonnegativeCone::applyW(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const {
@@ -31,6 +30,14 @@ void NonnegativeCone::applyW(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out
 
 void NonnegativeCone::applyWInv(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const {
   out.array() = x.array() / w_.array();
+}
+
+void NonnegativeCone::mulHs(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const {
+  out.array() = w_.array().square() * x.array();
+}
+
+void NonnegativeCone::writeHsLowerTriangle(Eigen::Ref<Vec> out) const {
+  out.array() = w_.array().square();
 }
 
 void NonnegativeCone::scaledUnitShift(Eigen::Ref<Vec> x, Scalar alpha) const {

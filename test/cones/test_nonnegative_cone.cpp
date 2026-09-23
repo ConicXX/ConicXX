@@ -40,13 +40,30 @@ TEST(NonnegativeCone, NTScalingSatisfiesW2zEqualsS) {
   Vec Wz(4);
   cone.applyW(z, Wz);
   Vec HsZ(4);
-  HsZ.array() = cone.scalingBlock().diagonal().array() * z.array();
+  cone.mulHs(z, HsZ);
   testutil::expectVecNear(HsZ, s, 1e-12);  // Hs*z == s identically
 
   Vec lambda_from_s(4), lambda_from_z(4);
   cone.applyWInv(s, lambda_from_s);
   cone.applyW(z, lambda_from_z);
   testutil::expectVecNear(lambda_from_s, lambda_from_z, 1e-12);  // W^-1 s == W z
+}
+
+TEST(NonnegativeCone, WriteHsLowerTriangleMatchesMulHs) {
+  NonnegativeCone cone(4);
+  Vec s(4), z(4);
+  s << 1.0, 4.0, 0.5, 9.0;
+  z << 2.0, 1.0, 2.0, 3.0;
+  cone.updateScaling(s, z);
+
+  ASSERT_EQ(cone.numHsEntries(), 4);  // diagonal only
+  Vec entries(cone.numHsEntries());
+  cone.writeHsLowerTriangle(entries);
+
+  Vec x = Vec::Random(4), Hsx_expected(4), Hsx_from_entries(4);
+  cone.mulHs(x, Hsx_expected);
+  Hsx_from_entries.array() = entries.array() * x.array();  // Hs is diagonal
+  testutil::expectVecNear(Hsx_from_entries, Hsx_expected, 1e-14);
 }
 
 TEST(NonnegativeCone, MarginAndShift) {

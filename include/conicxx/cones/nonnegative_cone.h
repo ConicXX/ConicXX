@@ -24,7 +24,9 @@ class NonnegativeCone final : public ConeBase {
   void applyW(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const override;
   void applyWInv(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const override;
 
-  const Mat& scalingBlock() const override { return Hs_; }
+  void mulHs(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const override;
+  Index numHsEntries() const override { return dim_; }
+  void writeHsLowerTriangle(Eigen::Ref<Vec> out) const override;
 
   Scalar margin(const Eigen::Ref<const Vec>& x) const override { return x.minCoeff(); }
 
@@ -34,9 +36,8 @@ class NonnegativeCone final : public ConeBase {
                  Scalar alpha_max) const override;
 
  private:
-  Vec e_;   // ones
-  Vec w_;   // NT scaling: w_i = sqrt(s_i/z_i)
-  Mat Hs_;  // diag(w_i^2) = diag(s_i/z_i)
+  Vec e_;  // ones
+  Vec w_;  // NT scaling: w_i = sqrt(s_i/z_i); Hs = diag(w_i^2) = diag(s_i/z_i)
 };
 
 }  // namespace conicxx

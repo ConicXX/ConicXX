@@ -1,6 +1,7 @@
 #include "conicxx/kkt/kkt_system.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 
@@ -72,19 +73,18 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
     }
   }
 
+  Index max_hs_entries = 0;
   for (Index bi = 0; bi < cones.numBlocks(); ++bi) {
     const ConeBase& blk = cones.block(bi);
     const Index off = cones.blockOffset(bi);
     const Index d = blk.dim();
     HsBlockSlots hbs;
-    hbs.z_offset = off;
-    hbs.dim = d;
     if (blk.type() == ConeType::SecondOrder) {
       // The NT scaling block Hs = W^T W is genuinely dense for SOC blocks.
       for (Index a = 0; a < d; ++a) {
         for (Index b = 0; b <= a; ++b) {
-          const Index slot = sparsity_.addEntry(n_ + off + a, n_ + off + b);
-          hbs.slots.emplace_back(slot, a, b);
+          hbs.slots.push_back(sparsity_.addEntry(n_ + off + a, n_ + off + b));
+          if (a == b) hbs.diag_positions.push_back(static_cast<Index>(hbs.slots.size()) - 1);
         }
       }
     } else {
@@ -97,12 +97,15 @@ bool KktSystem::setup(const SparseMat& P_upper, const SparseMat& A, const ConeSe
       // symbolic/numeric factorization for a block that mathematically
       // contributes nothing off-diagonal.
       for (Index a = 0; a < d; ++a) {
-        const Index slot = sparsity_.addEntry(n_ + off + a, n_ + off + a);
-        hbs.slots.emplace_back(slot, a, a);
+        hbs.slots.push_back(sparsity_.addEntry(n_ + off + a, n_ + off + a));
+        hbs.diag_positions.push_back(static_cast<Index>(hbs.slots.size()) - 1);
       }
     }
+    assert(static_cast<Index>(hbs.slots.size()) == blk.numHsEntries());
+    max_hs_entries = std::max(max_hs_entries, static_cast<Index>(hbs.slots.size()));
     hs_blocks_.push_back(std::move(hbs));
   }
+  hs_entries_scratch_.resize(max_hs_entries);
 
   K_ = sparsity_.finalize(n_ + m_, n_ + m_);
   backendAnalyzePattern(K_);
@@ -137,13 +140,15 @@ bool KktSystem::updateData(const SparseMat* P_upper, const SparseMat* A) {
 }
 
 bool KktSystem::updateScalingAndFactorize(const ConeSet& cones) {
-  const auto& blocks = cones.scalingBlocks();
-  for (size_t bi = 0; bi < hs_blocks_.size(); ++bi) {
-    const Mat& Hs = blocks[bi];
-    for (const auto& [slot, a, b] : hs_blocks_[bi].slots) {
-      Scalar v = -Hs(a, b);
-      if (a == b) v -= static_reg_a_;
-      sparsity_.setValue(K_, slot, v);
+  for (Index bi = 0; bi < cones.numBlocks(); ++bi) {
+    const ConeBase& blk = cones.block(bi);
+    HsBlockSlots& hbs = hs_blocks_[static_cast<size_t>(bi)];
+    const Index ne = static_cast<Index>(hbs.slots.size());
+    Eigen::Ref<Vec> entries = hs_entries_scratch_.head(ne);
+    blk.writeHsLowerTriangle(entries);
+    for (Index pos : hbs.diag_positions) entries[pos] += static_reg_a_;
+    for (Index i = 0; i < ne; ++i) {
+      sparsity_.setValue(K_, hbs.slots[static_cast<size_t>(i)], -entries[i]);
     }
   }
   return factorizeWithRetry();
@@ -158,10 +163,9 @@ void KktSystem::writeRegularizedDiagonal(SparseMat& K, Scalar extra_p_reg,
   }
   if (extra_a_reg != 0.0) {
     for (const auto& hbs : hs_blocks_) {
-      for (const auto& [slot, a, b] : hbs.slots) {
-        if (a == b) {
-          sparsity_.setValue(K, slot, sparsity_.getValue(K, slot) - extra_a_reg);
-        }
+      for (Index pos : hbs.diag_positions) {
+        const Index slot = hbs.slots[static_cast<size_t>(pos)];
+        sparsity_.setValue(K, slot, sparsity_.getValue(K, slot) - extra_a_reg);
       }
     }
   }

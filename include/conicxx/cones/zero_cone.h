@@ -27,7 +27,9 @@ class ZeroCone final : public ConeBase {
   void applyW(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const override;
   void applyWInv(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> out) const override;
 
-  const Mat& scalingBlock() const override { return Hs_; }
+  void mulHs(const Eigen::Ref<const Vec>&, Eigen::Ref<Vec> out) const override { out.setZero(); }
+  Index numHsEntries() const override { return dim_; }
+  void writeHsLowerTriangle(Eigen::Ref<Vec> out) const override { out.setZero(); }
 
   Scalar margin(const Eigen::Ref<const Vec>& x) const override {
     (void)x;
@@ -47,8 +49,7 @@ class ZeroCone final : public ConeBase {
   }
 
  private:
-  Vec e_;   // identically zero
-  Mat Hs_;  // identically zero (dim x dim)
+  Vec e_;  // identically zero
 };
 
 }  // namespace conicxx

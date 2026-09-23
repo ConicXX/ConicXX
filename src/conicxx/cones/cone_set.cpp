@@ -15,13 +15,11 @@ ConeSet::ConeSet(const ConeSpec& spec) {
   for (Index d : spec.soc_dims) cones_.push_back(std::make_unique<SecondOrderCone>(d));
 
   offsets_.resize(cones_.size());
-  scaling_blocks_.resize(cones_.size());
   Index offset = 0;
   for (size_t i = 0; i < cones_.size(); ++i) {
     offsets_[i] = offset;
     offset += cones_[i]->dim();
     degree_ += cones_[i]->degree();
-    scaling_blocks_[i] = cones_[i]->scalingBlock();
   }
   total_dim_ = offset;
 
@@ -49,7 +47,6 @@ void ConeSet::updateScaling(const Vec& s, const Vec& z) {
   for (size_t i = 0; i < cones_.size(); ++i) {
     const Index off = offsets_[i], d = cones_[i]->dim();
     cones_[i]->updateScaling(s.segment(off, d), z.segment(off, d));
-    scaling_blocks_[i] = cones_[i]->scalingBlock();
   }
 }
 
@@ -70,7 +67,7 @@ void ConeSet::applyWInv(const Vec& x, Eigen::Ref<Vec> out) const {
 void ConeSet::mulHs(const Vec& x, Eigen::Ref<Vec> out) const {
   for (size_t i = 0; i < cones_.size(); ++i) {
     const Index off = offsets_[i], d = cones_[i]->dim();
-    out.segment(off, d).noalias() = scaling_blocks_[i] * x.segment(off, d);
+    cones_[i]->mulHs(x.segment(off, d), out.segment(off, d));
   }
 }
 

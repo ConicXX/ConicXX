@@ -166,6 +166,15 @@ void SecondOrderCone::applyWInv(const Eigen::Ref<const Vec>& x, Eigen::Ref<Vec> 
   out = W_lu_.solve(x);
 }
 
+void SecondOrderCone::writeHsLowerTriangle(Eigen::Ref<Vec> out) const {
+  Index idx = 0;
+  for (Index a = 0; a < dim_; ++a) {
+    for (Index b = 0; b <= a; ++b) {
+      out[idx++] = Hs_(a, b);
+    }
+  }
+}
+
 Scalar SecondOrderCone::margin(const Eigen::Ref<const Vec>& x) const {
   const Index m = dim_;
   return x[0] - x.tail(m - 1).norm();

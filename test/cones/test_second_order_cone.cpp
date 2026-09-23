@@ -52,7 +52,7 @@ TEST(SecondOrderCone, NTScalingIdentities) {
 
   // Defining property of NT scaling: W^2 z == s (equivalently Hs*z == s).
   Vec Hsz(3);
-  Hsz.noalias() = cone.scalingBlock() * z;
+  cone.mulHs(z, Hsz);
   testutil::expectVecNear(Hsz, s, 1e-10);
 
   // lambda = W^-1 s == W z
@@ -61,22 +61,56 @@ TEST(SecondOrderCone, NTScalingIdentities) {
   cone.applyW(z, lambda_from_z);
   testutil::expectVecNear(lambda_from_s, lambda_from_z, 1e-10);
 
-  // W is symmetric, and Hs == W^T W == W*W.
-  EXPECT_NEAR((cone.scalingBlock() - cone.scalingBlock().transpose()).norm(), 0.0, 1e-12);
+  // Hs == W^T W == W*W is symmetric: x'(Hs y) == y'(Hs x) for any x, y.
+  Vec x(3), y(3);
+  x << 0.4, -0.2, 0.7;
+  y << -0.1, 0.9, 0.3;
+  Vec Hsx(3), Hsy(3);
+  cone.mulHs(x, Hsx);
+  cone.mulHs(y, Hsy);
+  EXPECT_NEAR(x.dot(Hsy), y.dot(Hsx), 1e-12);
 
   // applyW fast-path formula agrees with the cached dense scaling matrix
   // constructed via the same NT-scaling data (self-consistency check).
-  Vec x(3);
-  x << 0.4, -0.2, 0.7;
   Vec Wx_fast(3);
   cone.applyW(x, Wx_fast);
   Vec WWx(3);
   cone.applyW(x, WWx);
   Vec WWx2(3);
   cone.applyW(WWx, WWx2);
-  Vec Hsx(3);
-  Hsx.noalias() = cone.scalingBlock() * x;
   testutil::expectVecNear(WWx2, Hsx, 1e-10);
+}
+
+TEST(SecondOrderCone, WriteHsLowerTriangleMatchesMulHs) {
+  SecondOrderCone cone(3);
+  Vec s(3), z(3);
+  s << 3.0, 1.0, 1.0;
+  z << 2.0, 0.5, 0.5;
+  cone.updateScaling(s, z);
+
+  ASSERT_EQ(cone.numHsEntries(), 6);  // dim*(dim+1)/2
+  Vec entries(cone.numHsEntries());
+  cone.writeHsLowerTriangle(entries);
+
+  // Reconstruct the dense symmetric Hs from the row-major lower-triangle entries and check it
+  // reproduces the same matvec as the structured mulHs() -- the "structured scaling is
+  // numerically identical to dense" cross-check from CONICXX_AGENT_TASKS.md Phase 1.
+  Mat Hs = Mat::Zero(3, 3);
+  Index idx = 0;
+  for (Index a = 0; a < 3; ++a) {
+    for (Index b = 0; b <= a; ++b) {
+      Hs(a, b) = entries[idx];
+      Hs(b, a) = entries[idx];
+      ++idx;
+    }
+  }
+
+  Vec x(3);
+  x << 0.4, -0.2, 0.7;
+  Vec Hsx_expected(3), Hsx_from_entries(3);
+  cone.mulHs(x, Hsx_expected);
+  Hsx_from_entries.noalias() = Hs * x;
+  testutil::expectVecNear(Hsx_from_entries, Hsx_expected, 1e-12);
 }
 
 TEST(SecondOrderCone, MarginAndShift) {

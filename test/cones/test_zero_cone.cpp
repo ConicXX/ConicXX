@@ -12,11 +12,21 @@ TEST(ZeroCone, BasicProperties) {
   EXPECT_TRUE(cone.identityElement().isZero());
 }
 
-TEST(ZeroCone, ScalingBlockIsZero) {
+TEST(ZeroCone, MulHsIsZero) {
   ZeroCone cone(3);
   Vec s = Vec::Random(3), z = Vec::Random(3);
   cone.updateScaling(s, z);
-  EXPECT_TRUE(cone.scalingBlock().isZero());
+  Vec x = Vec::Random(3), out(3);
+  cone.mulHs(x, out);
+  EXPECT_TRUE(out.isZero());
+}
+
+TEST(ZeroCone, WriteHsLowerTriangleIsZero) {
+  ZeroCone cone(3);
+  EXPECT_EQ(cone.numHsEntries(), 3);
+  Vec entries(cone.numHsEntries());
+  cone.writeHsLowerTriangle(entries);
+  EXPECT_TRUE(entries.isZero());
 }
 
 TEST(ZeroCone, ApplyWIsZero) {
