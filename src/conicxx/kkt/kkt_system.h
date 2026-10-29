@@ -3,10 +3,10 @@
 #include <utility>
 #include <vector>
 
-#include "conicxx/cone_set.h"
-#include "conicxx/quasidefinite_ldlt.h"
+#include "conicxx/cones/cone_set.h"
+#include "conicxx/kkt/quasidefinite_ldlt.h"
 #include "conicxx/settings.h"
-#include "conicxx/sparsity_map.h"
+#include "conicxx/kkt/sparsity_map.h"
 #include "conicxx/types.h"
 
 namespace conicxx::detail {

@@ -1,4 +1,4 @@
-#include "conicxx/solver_impl.h"
+#include "conicxx/ipm/solver_impl.h"
 
 #include <algorithm>
 #include <cmath>

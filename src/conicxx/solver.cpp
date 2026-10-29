@@ -1,6 +1,6 @@
 #include "conicxx/solver.h"
 
-#include "conicxx/solver_impl.h"
+#include "conicxx/ipm/solver_impl.h"
 
 namespace conicxx {
 

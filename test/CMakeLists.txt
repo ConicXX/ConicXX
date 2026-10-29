@@ -18,33 +18,34 @@ endif()
 
 include(GoogleTest)
 
-# Tests reach into internal headers (KktSystem, QuasiDefiniteLdlt, cones); those live in
-# src/conicxx next to the public ones, so the conicxx target's include path already covers them.
+# Tests reach into internal headers (conicxx/cones/, conicxx/kkt/, conicxx/ipm/); they live under
+# src/conicxx like the public ones, so the conicxx target's include path already covers them. The
+# test directories mirror that layout; api/ covers the public helpers.
 add_executable(conicxx_tests
-  test_alloc_free_hot_path.cpp
-  test_compliant_rows.cpp
-  test_cone_set.cpp
-  test_convert.cpp
-  test_equilibration.cpp
-  test_infeasible.cpp
-  test_ipm_safeguards.cpp
-  test_kkt_system.cpp
-  test_nonnegative_cone.cpp
-  test_quasidefinite_ldlt.cpp
-  test_second_order_cone.cpp
-  test_solve_apex_contacts.cpp
-  test_solve_dense_input.cpp
-  test_solve_equality_robustness.cpp
-  test_solve_friction_qp_soc.cpp
-  test_solve_lp.cpp
-  test_solve_qp.cpp
-  test_solve_socp.cpp
-  test_sparsity_map.cpp
-  test_termination_unscaled.cpp
-  test_update_reuse.cpp
-  test_version.cpp
-  test_warm_start.cpp
-  test_zero_cone.cpp
+  api/test_convert.cpp
+  api/test_version.cpp
+  cones/test_cone_set.cpp
+  cones/test_nonnegative_cone.cpp
+  cones/test_second_order_cone.cpp
+  cones/test_zero_cone.cpp
+  kkt/test_kkt_system.cpp
+  kkt/test_quasidefinite_ldlt.cpp
+  kkt/test_sparsity_map.cpp
+  solver/test_alloc_free_hot_path.cpp
+  solver/test_compliant_rows.cpp
+  solver/test_equilibration.cpp
+  solver/test_infeasible.cpp
+  solver/test_ipm_safeguards.cpp
+  solver/test_solve_apex_contacts.cpp
+  solver/test_solve_dense_input.cpp
+  solver/test_solve_equality_robustness.cpp
+  solver/test_solve_friction_qp_soc.cpp
+  solver/test_solve_lp.cpp
+  solver/test_solve_qp.cpp
+  solver/test_solve_socp.cpp
+  solver/test_termination_unscaled.cpp
+  solver/test_update_reuse.cpp
+  solver/test_warm_start.cpp
 )
 target_link_libraries(conicxx_tests PRIVATE conicxx::conicxx GTest::gtest_main)
 target_include_directories(conicxx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

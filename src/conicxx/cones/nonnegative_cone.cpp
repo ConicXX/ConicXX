@@ -1,4 +1,4 @@
-#include "conicxx/nonnegative_cone.h"
+#include "conicxx/cones/nonnegative_cone.h"
 
 #include <algorithm>
 #include <cmath>

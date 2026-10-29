@@ -1,6 +1,6 @@
 #pragma once
 
-#include "conicxx/cone_set.h"
+#include "conicxx/cones/cone_set.h"
 #include "conicxx/settings.h"
 #include "conicxx/types.h"
 

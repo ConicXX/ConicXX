@@ -1,6 +1,6 @@
 #include "problem_generators.h"
 
-#include <conicxx/cone_set.h>
+#include <conicxx/cones/cone_set.h>
 
 #include <cmath>
 #include <vector>

@@ -53,8 +53,9 @@ include(cmake/CompilerWarnings.cmake)
 configure_file(src/conicxx/version.h.in ${PROJECT_BINARY_DIR}/include/conicxx/version.h @ONLY)
 
 # --- Library ---
-# Flat layout: every header sits next to its source in src/conicxx. Only the headers listed in
-# CONICXX_PUBLIC_HEADERS are installed; all others are internal.
+# Layout: every header sits next to its source. The public API is at the top of src/conicxx, the
+# internals in src/conicxx/{cones,kkt,ipm}. Only the headers listed in CONICXX_PUBLIC_HEADERS are
+# installed; all others are internal.
 set(CONICXX_PUBLIC_HEADERS
   src/conicxx/cone_spec.h
   src/conicxx/convert.h
@@ -64,19 +65,19 @@ set(CONICXX_PUBLIC_HEADERS
   src/conicxx/types.h
 )
 set(CONICXX_SOURCES
-  src/conicxx/cone_set.cpp
   src/conicxx/convert.cpp
-  src/conicxx/equilibration.cpp
-  src/conicxx/kkt_system.cpp
-  src/conicxx/nonnegative_cone.cpp
-  src/conicxx/quasidefinite_ldlt.cpp
-  src/conicxx/second_order_cone.cpp
   src/conicxx/solution.cpp
   src/conicxx/solver.cpp
-  src/conicxx/solver_impl.cpp
-  src/conicxx/sparsity_map.cpp
   src/conicxx/version.cpp
-  src/conicxx/zero_cone.cpp
+  src/conicxx/cones/cone_set.cpp
+  src/conicxx/cones/nonnegative_cone.cpp
+  src/conicxx/cones/second_order_cone.cpp
+  src/conicxx/cones/zero_cone.cpp
+  src/conicxx/ipm/equilibration.cpp
+  src/conicxx/ipm/solver_impl.cpp
+  src/conicxx/kkt/kkt_system.cpp
+  src/conicxx/kkt/quasidefinite_ldlt.cpp
+  src/conicxx/kkt/sparsity_map.cpp
 )
 
 if(CONICXX_BUILD_SHARED)

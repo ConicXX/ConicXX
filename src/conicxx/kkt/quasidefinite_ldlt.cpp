@@ -1,6 +1,6 @@
 // The elimination tree and the up-looking numeric factorization follow QDLDL
 // (https://github.com/osqp/qdldl, Apache-2.0); see NOTICE.
-#include "conicxx/quasidefinite_ldlt.h"
+#include "conicxx/kkt/quasidefinite_ldlt.h"
 
 #include <Eigen/OrderingMethods>
 #include <algorithm>

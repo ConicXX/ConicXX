@@ -97,7 +97,7 @@ restored before finalizing, and upgraded to `AlmostSolved`/`AlmostPrimalInfeasib
 
 ### Algorithm
 
-`QuasiDefiniteLdlt` (`src/conicxx/quasidefinite_ldlt.{h,cpp}`) factorizes the KKT matrix
+`QuasiDefiniteLdlt` (`src/conicxx/kkt/quasidefinite_ldlt.{h,cpp}`) factorizes the KKT matrix
 
 ```
 K = [ P   A' ]      Hs = blockdiag(0 on zero cones, W'W on orthant and SOC blocks)
@@ -223,6 +223,84 @@ solves.
    contact matrices it trades a cheap factorization for more of the expensive solves.
 4. **Gondzio's multiple centrality correctors** reuse the factorization (one solve each) to save
    iterations; they pay off only where the factorization dominates.
+
+### One factorization per IPM iteration, not per solve and not per time step
+
+The question comes up regularly, because the QOCO and Clarabel papers speak of a fixed KKT structure.
+
+- **Within one iteration the matrix is constant.** All right-hand sides of an iteration (the constant
+  one (-q, b) for the tau elimination, the affine predictor, the combined corrector, and further
+  correctors if any) are solved with one factorization of `K_k = [P + delta, A'; A, -(W_k'W_k + delta)]`.
+- **Across iterations it is not.** W_k is the NT scaling of the current (s_k, z_k), so the (2,2) block
+  changes in every iteration and every cone block. What is constant is the sparsity pattern: ordering,
+  elimination tree and the row structure of L are computed once per pattern (`analyzePattern()`), and
+  every iteration is one numeric pass. "Constant" in those papers refers to the pattern.
+- **Why not keep the values.** The Newton direction linearizes `s o z = sigma mu e` at the current
+  point. Near the solution the scaling of an active cone goes to 0 and that of an inactive one to
+  infinity; an old factorization is a poor approximation exactly where accuracy matters. A frozen
+  matrix turns the method into a different one (see the alternatives below).
+- **Where "many factorizations per update" came from.** Before Phase 9 a zero pivot on an equality row
+  started a retry ladder that refactorized with larger regularization, up to 19 times per update. That
+  was a defect, not part of the method. Now: one factorization for the cold start (identity scaling),
+  one per iteration, none in the converged iteration; an accepted warm start saves the first one.
+- **Dynamic regularization is part of the single numeric pass.** In the up-looking factorization the
+  pivot d_k is replaced by `sign_k * delta` before D_k and 1/D_k are stored and used for the remaining
+  rows. The result is the exact factorization of a diagonally perturbed matrix,
+  `L D L' = K + diag(e)` with e_k != 0 only at replaced pivots, and refinement against K removes the
+  perturbation from the solution. Changing D only after the factorization would be something else:
+  the entries of L below pivot k were computed with the old d_k, so L D L' would differ from K by a
+  dense update of the trailing block, not by a diagonal perturbation, and the inertia guarantee would
+  be lost.
+
+### Alternatives to one factorization per IPM iteration
+
+**Rank-one / rank-k updates (Davis-Hager update/downdate) do not help inside an IPM.** They pay when few
+entries change. Between two iterations the 3x3 scaling block of every cone changes, and none settles: a
+separating contact has z -> 0 with s fixed (its block grows with 1/mu), a sticking one s -> 0 (its block
+goes to 0). That is a rank-3*(#contacts) change per iteration, about 40,000 for the domino scene; each
+rank-1 update costs about one column path of L, so the updates cost far more than refactorizing.
+"Partial updating" from LP IPMs (refresh only entries whose ratio changed by more than a factor and
+repair the error with a Krylov method) gives up the exact Newton direction and only pays in early
+iterations. Low-rank updates make sense only for the part that is constant within a time step (the
+contact-space matrix of a static/dynamic split, when contacts appear or disappear), and even there the
+Jacobians of jointed rigid bodies move with the configuration in every step.
+
+**Methods with truly one factorization per time step** leave the IPM class:
+
+1. **ADMM / Douglas-Rachford (OSQP, SCS).** The matrix `[P + sigma I, A'; A, -I/rho]` contains no cone
+   scaling: one factorization, then per iteration a triangular solve and a cheap SOC projection. Linear
+   convergence, tens to hundreds of iterations for 1e-4 to 1e-6 depending on rho and conditioning;
+   adapting rho needs a (rare) refactorization; warm starts are fully usable because there is no
+   central path. Anderson acceleration (SCS) helps. CardilloCxx's projected Jacobi solver (bilateral
+   system factorized once, projected iteration on the contacts) belongs to this family.
+2. **Hybrid / crossover:** a few ADMM iterations from the warm start, then one to three Newton steps
+   (IPM or semismooth) for the last digits; factorizations only in the Newton phase.
+3. **Frozen factorization as preconditioner** (inexact IPM with MINRES/GMRES): one factorization per
+   step, Krylov iterations per IPM iteration. Weak near convergence for the reason above; research.
+
+**Faster IPMs that stay robust:**
+
+1. **No re-setup when the contact set changes** (caller side): a superset pattern (contact rows of the
+   broadphase candidates; inactive contacts as rows with stored zeros or a large gap) keeps the
+   symbolic analysis, saves the cold start computed for the warm-start comparison and keeps the
+   solver's own warm start.
+2. **Reduced systems** (T8.1, T11.5). With P = M diagonal the cone rows can be eliminated block-wise:
+   body space `M + sum_i A_i' H_i^-1 A_i` (6 dofs per body, sparsity of the contact graph, positive
+   definite, Cholesky without pivot signs; ill-conditioned near convergence as in LP normal equations,
+   handled by regularization and refinement), or contact space (Delassus operator plus H, T11.5) when
+   contacts are few relative to the dofs. The symbolic analysis can choose by flop count. A
+   constrained ordering (contact rows first) of the full KKT produces the body-space factor as its
+   trailing block; whether AMD already finds this order is not measured yet.
+3. **Supernodal or multifrontal factorization** (BLAS-3 on dense column blocks; CHOLMOD, MA57, Pardiso,
+   cuDSS out of scope). `QuasiDefiniteLdlt` is simplicial, i.e. scalar code.
+4. **Gondzio's multiple centrality correctors**: one extra solve each with the existing factorization;
+   pays where the factorization dominates the iteration.
+
+**A non-IPM alternative for time stepping: semismooth Newton** on the natural map or Fischer-Burmeister
+(Alart-Curnier in Siconos, so-bogus, non-smooth Newton in PhysX/Warp). It refactorizes every iteration
+too, but has no central path, so the warm start from the previous step is used in full (typically 2 to 5
+iterations are reported), and it can solve exact (non-associated) Coulomb friction, which no convex
+conic method can. Needs globalization (line search, or a fallback to projected Gauss-Seidel/Jacobi).
 
 ## Compliant rows (Phase 12 in CONICXX_AGENT_TASKS.md)
 
@@ -519,3 +597,44 @@ Observations and open items:
   4.0 vs 4.6 iterations, 5.4 vs 9.9 ms per solve).
 - **Cost per iteration** on domino is about 70 ms (KKT dimension about 42,000): T11.5 (contact-space
   Schur complement) is the next structural lever once the iteration count is settled.
+
+### Profile of the CardilloCxx target scenes
+
+Measured with temporary timers (removed again), default `scene_conicxx.config`, one run each: domino 10
+steps (n = 10,176, about 13,500 SOC3 contacts, m = 40,300, nnz(L) = 1.65e6 to 1.71e6), slinky 40 steps
+(n = 4,956, 4,950 compliant rows, 0 -> 6,518 contacts, nnz(L) up to 8.6e5). Every step runs `setup()`.
+
+| | domino | slinky |
+|---|---|---|
+| solve per step | 847 ms | 134 ms |
+| iterations per step | 10.0 | 10.9 |
+| one numeric factorization | **60 ms** | 5.9 ms |
+| numeric factorization | **78 %** | **53 %** |
+| triangular solves (incl. refinement corrections) | 14 % | 25 % |
+| refinement residuals | 2 % | 11 % |
+| cone operations (NT scaling, Hs write, Jordan ops, step length) | 2.3 % | 4.7 % |
+| residuals and metrics | 1 % | 3 % |
+| other vector work | 2 % | 3 % |
+| setup per step (outside solve) | 46 ms | 18 ms |
+| setup / whole step | 5 % | 10 % |
+| cold starts computed only for the warm-start comparison | 9 % of factorizations | 8 % |
+
+Setup splits roughly evenly into equilibration, KKT pattern, AMD and symbolic analysis (symbolic largest
+on domino: 18 ms).
+
+Consequences, in order of expected benefit:
+
+1. **Domino is factorization-bound.** 60 ms for nnz(L) = 1.7e6 is the speed of scalar simplicial code.
+   Levers: the ordering (check whether AMD eliminates the contact rows first; a constrained ordering is
+   the body-space reduction without new code paths), a supernodal factorization, the body-space
+   Cholesky (T8.1). All solves of one iteration together cost about 18 % of one factorization, so
+   Gondzio correctors are cheap here relative to a saved iteration.
+2. **No re-setup** (caller side, superset pattern): saves setup plus the extra cold-start
+   factorization, about 14 % on domino and 18 % on slinky, and keeps the internal warm start.
+3. **Slinky** spends 36 % in solves and refinement residuals; the compact compliant rows need about
+   twice the refinement steps of the augmented form (44 vs 23 per solve), worth 10-15 % there.
+   Supernodal factorization helps less than on domino.
+4. **Cone code** (2-5 %) and rank updates are not worth further work.
+5. **ADMM break-even on domino:** a triangular solve pass costs a few ms against 60 ms per
+   factorization, so the budget of a 10-iteration IPM solve is about 150-200 ADMM iterations. A
+   warm-started ADMM at 1e-5 can stay within that, but not reliably.

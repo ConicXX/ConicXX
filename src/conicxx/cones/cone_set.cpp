@@ -1,11 +1,11 @@
-#include "conicxx/cone_set.h"
+#include "conicxx/cones/cone_set.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <type_traits>
 
-#include "conicxx/soc_kernels.h"
+#include "conicxx/cones/soc_kernels.h"
 
 namespace conicxx {
 

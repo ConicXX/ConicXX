@@ -5,9 +5,9 @@
 #include <memory>
 
 #include "conicxx/cone_spec.h"
-#include "conicxx/cone_set.h"
-#include "conicxx/equilibration.h"
-#include "conicxx/kkt_system.h"
+#include "conicxx/cones/cone_set.h"
+#include "conicxx/ipm/equilibration.h"
+#include "conicxx/kkt/kkt_system.h"
 #include "conicxx/settings.h"
 #include "conicxx/solution.h"
 #include "conicxx/types.h"

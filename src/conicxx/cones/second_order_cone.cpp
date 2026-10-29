@@ -1,6 +1,6 @@
-#include "conicxx/second_order_cone.h"
+#include "conicxx/cones/second_order_cone.h"
 
-#include "conicxx/soc_kernels.h"
+#include "conicxx/cones/soc_kernels.h"
 
 namespace conicxx {
 

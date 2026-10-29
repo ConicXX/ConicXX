@@ -1,4 +1,4 @@
-#include "conicxx/sparsity_map.h"
+#include "conicxx/kkt/sparsity_map.h"
 
 #include <gtest/gtest.h>
 

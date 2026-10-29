@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "conicxx/cone_spec.h"
-#include "conicxx/cone_set.h"
+#include "conicxx/cones/cone_set.h"
 #include "conicxx/solution.h"
 #include "conicxx/types.h"
 

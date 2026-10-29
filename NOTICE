@@ -1,6 +1,6 @@
 ConicXX is licensed under the GNU General Public License v3.0 (see LICENSE).
 
-src/conicxx/quasidefinite_ldlt.cpp implements the elimination tree and the
+src/conicxx/kkt/quasidefinite_ldlt.cpp implements the elimination tree and the
 up-looking LDL^T factorization following QDLDL, which is licensed under the
 Apache License, Version 2.0.
 

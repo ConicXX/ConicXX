@@ -1,10 +1,10 @@
-#include "conicxx/kkt_system.h"
+#include "conicxx/kkt/kkt_system.h"
 
 #include <gtest/gtest.h>
 
 #include <Eigen/Dense>
 
-#include "conicxx/cone_set.h"
+#include "conicxx/cones/cone_set.h"
 #include "test_helpers.h"
 
 using namespace conicxx;

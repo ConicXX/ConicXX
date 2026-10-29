@@ -3,7 +3,7 @@
 #include <utility>
 #include <vector>
 
-#include "conicxx/cone_base.h"
+#include "conicxx/cones/cone_base.h"
 #include "conicxx/cone_spec.h"
 
 namespace conicxx {

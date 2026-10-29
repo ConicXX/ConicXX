@@ -1,4 +1,4 @@
-#include "conicxx/cone_set.h"
+#include "conicxx/cones/cone_set.h"
 
 #include <gtest/gtest.h>
 

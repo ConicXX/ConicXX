@@ -4,8 +4,8 @@
 #include <limits>
 #include <random>
 
-#include "conicxx/nonnegative_cone.h"
-#include "conicxx/second_order_cone.h"
+#include "conicxx/cones/nonnegative_cone.h"
+#include "conicxx/cones/second_order_cone.h"
 #include "conicxx/solver.h"
 #include "test_helpers.h"
 

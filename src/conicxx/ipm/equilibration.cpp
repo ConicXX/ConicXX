@@ -1,4 +1,4 @@
-#include "conicxx/equilibration.h"
+#include "conicxx/ipm/equilibration.h"
 
 #include <algorithm>
 #include <cmath>

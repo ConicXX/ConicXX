@@ -1,6 +1,6 @@
 #pragma once
 
-#include "conicxx/cone_base.h"
+#include "conicxx/cones/cone_base.h"
 
 namespace conicxx {
 

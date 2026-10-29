@@ -1,8 +1,8 @@
-#include "conicxx/equilibration.h"
+#include "conicxx/ipm/equilibration.h"
 
 #include <gtest/gtest.h>
 
-#include "conicxx/cone_set.h"
+#include "conicxx/cones/cone_set.h"
 #include "test_helpers.h"
 
 using namespace conicxx;
