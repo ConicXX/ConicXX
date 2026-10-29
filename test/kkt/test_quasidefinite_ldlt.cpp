@@ -180,3 +180,72 @@ TEST(QuasiDefiniteLdlt, ReportsNonFiniteDataAndPatternMismatch) {
     EXPECT_FALSE(ldl.factorize(other));
   }
 }
+
+namespace {
+
+// Factorizes K with both numeric variants (same ordering, same regularization) and compares.
+void expectSupernodalMatchesSimplicial(const TestKkt& t, Scalar reg, const std::vector<Index>* perm,
+                                       unsigned seed, bool expect_supernodal) {
+  const SparseMat K = lowerOf(t.K);
+  QuasiDefiniteLdlt simp, sup;
+  simp.params.supernodal = false;
+  sup.params.supernodal = true;
+  ASSERT_TRUE(simp.analyzePattern(K, t.signs, perm));
+  ASSERT_TRUE(sup.analyzePattern(K, t.signs, perm));
+  EXPECT_FALSE(simp.isSupernodal());
+  EXPECT_EQ(sup.isSupernodal(), expect_supernodal) << "seed " << seed;
+  EXPECT_EQ(simp.nonZerosL(), sup.nonZerosL());  // postordering does not change the fill
+  simp.setStaticRegularization(Vec::Constant(K.rows(), reg));
+  sup.setStaticRegularization(Vec::Constant(K.rows(), reg));
+  ASSERT_TRUE(simp.factorize(K));
+  ASSERT_TRUE(sup.factorize(K));
+  EXPECT_EQ(simp.numPositivePivots(), sup.numPositivePivots());
+  EXPECT_EQ(simp.numDynamicRegularized(), sup.numDynamicRegularized());
+  const Vec b = randomVec(K.rows(), seed);
+  Vec xs, xp;
+  simp.solve(b, xs);
+  sup.solve(b, xp);
+  EXPECT_LT((xs - xp).lpNorm<Eigen::Infinity>(), 1e-9 * (1.0 + xs.lpNorm<Eigen::Infinity>())) << "seed " << seed;
+  EXPECT_LT(relResidual(t.K, xp, b), 1e-11) << "seed " << seed;
+}
+
+}  // namespace
+
+TEST(QuasiDefiniteLdlt, SupernodalMatchesSimplicial) {
+  // Dense coupling of many rows to the variables gives wide supernodes (panel factorization and
+  // matrix-product updates); small cases exercise the scalar update path.
+  for (unsigned seed = 0; seed < 4; ++seed) {
+    // Too sparse a factor: the supernodal request falls back to the simplicial factorization.
+    expectSupernodalMatchesSimplicial(makeKkt(12, 2, 9, false, seed), 1e-8, nullptr, seed, false);
+    expectSupernodalMatchesSimplicial(makeKkt(120, 15, 90, false, 20 + seed), 1e-8, nullptr, seed, true);
+    expectSupernodalMatchesSimplicial(makeKkt(150, 30, 120, true, 40 + seed), 1e-8, nullptr, seed, true);
+  }
+}
+
+TEST(QuasiDefiniteLdlt, SupernodalDynamicRegularizationAndUserOrdering) {
+  // Duplicate equality rows without static regularization: both variants replace a pivot.
+  TestKkt t = makeKkt(60, 8, 45, false, 9);
+  const Index n = 60;
+  t.K.block(n + 1, 0, 1, n) = t.K.block(n, 0, 1, n);
+  t.K.block(0, n + 1, n, 1) = t.K.block(0, n, n, 1);
+  const SparseMat K = lowerOf(t.K);
+  for (const bool supernodal : {false, true}) {
+    QuasiDefiniteLdlt ldl;
+    ldl.params.supernodal = supernodal;
+    ASSERT_TRUE(ldl.analyzePattern(K, t.signs));
+    ASSERT_TRUE(ldl.factorize(K));
+    EXPECT_EQ(ldl.isSupernodal(), supernodal);
+    EXPECT_GT(ldl.numDynamicRegularized(), 0) << "supernodal " << supernodal;
+    EXPECT_EQ(ldl.numPositivePivots(), n);
+  }
+
+  // A user ordering (here: the identity, cone rows last) is accepted; an invalid one rejected.
+  const TestKkt u = makeKkt(40, 5, 30, false, 3);
+  std::vector<Index> identity(static_cast<size_t>(u.K.rows()));
+  for (Index i = 0; i < u.K.rows(); ++i) identity[static_cast<size_t>(i)] = i;
+  expectSupernodalMatchesSimplicial(u, 1e-8, &identity, 3, true);
+  std::vector<Index> invalid = identity;
+  invalid[1] = invalid[0];
+  QuasiDefiniteLdlt ldl;
+  EXPECT_FALSE(ldl.analyzePattern(lowerOf(u.K), u.signs, &invalid));
+}

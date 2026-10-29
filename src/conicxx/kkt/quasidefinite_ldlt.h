@@ -28,13 +28,19 @@ class QuasiDefiniteLdlt {
     Scalar refine_reltol = 1e-13;
     Scalar refine_abstol = 1e-12;
     Scalar refine_stop_ratio = 5;  ///< stop when ||r_old|| / ||r_new|| < refine_stop_ratio
+    /// Supernodal numeric factorization (dense blocks for columns with nested patterns) where it
+    /// pays, i.e. unless L is very sparse; read by analyzePattern(). Same pivots, regularization
+    /// and L as the simplicial one, up to roundoff.
+    bool supernodal = true;
   };
   Params params;
 
   /// Symbolic phase. K_lower: lower triangle (incl. diagonal) of a symmetric matrix, compressed
   /// column-major; entries above the diagonal are ignored, missing diagonal entries are zero.
   /// signs: expected pivot sign of every row in the original ordering (+1 or -1).
-  bool analyzePattern(const SparseMat& K_lower, const std::vector<signed char>& signs);
+  /// perm: pivot -> original row; nullptr (default) computes an AMD ordering.
+  bool analyzePattern(const SparseMat& K_lower, const std::vector<signed char>& signs,
+                      const std::vector<Index>* perm = nullptr);
 
   /// Static regularization per row in the original ordering: the pivot of row i starts from
   /// K_ii + sign_i * reg_i in factorize(). Zero after analyzePattern().
@@ -55,6 +61,8 @@ class QuasiDefiniteLdlt {
   Scalar solvePair(const Vec& b1, Vec& x1, const Vec& b2, Vec& x2, bool refine2);
 
   Index rows() const { return n_; }
+  /// The last analyzePattern() chose the supernodal factorization.
+  bool isSupernodal() const { return supernodal_; }
   Index nonZerosL() const { return n_ > 0 ? Lp_[static_cast<size_t>(n_)] : 0; }
   /// Pivots replaced by dynamic regularization in the last factorize().
   Index numDynamicRegularized() const { return num_dyn_reg_; }
@@ -68,6 +76,13 @@ class QuasiDefiniteLdlt {
 
  private:
   void buildPermutedUpper(const SparseMat& K_lower);
+  /// Elimination tree and column counts of L for the current C.
+  void eliminationTree(std::vector<Index>& etree, std::vector<Index>& Lnz) const;
+  void analyzeSupernodes(const std::vector<Index>& etree);
+  bool factorizeSimplicial();
+  bool factorizeSupernodal();
+  /// Applies dynamic regularization to pivot k and stores it; false for a zero/non-finite pivot.
+  bool setPivot(Index k, Scalar d);
   void solveInPlace(Vec& x) const;
   void solvePairInPlace(Vec& y) const;  // y interleaved: y[2k], y[2k+1]
   Scalar refine(Vec& xp, Vec& r, int& steps);
@@ -85,6 +100,17 @@ class QuasiDefiniteLdlt {
   std::vector<Scalar> Lx_, D_, Dinv_, sign_, reg_, y_;
   Vec bp_, xp_, xt_, r_, rt_;  // solve() and refinement workspaces, pivot order
   Vec xp2_, r2_, y2_;  // second right-hand side of solvePair(); y2_ interleaved
+
+  // Supernodal factorization: supernode s holds columns [sn_ptr_[s], sn_ptr_[s+1]), whose patterns
+  // are the trailing rows of the row list sn_rows_[sn_rows_ptr_[s] ...], stored as a dense
+  // column-major block at sn_x_[sn_x_ptr_[s]]. Lower entries of C by column (lo_*) for assembly.
+  bool supernodal_ = false;
+  std::vector<Index> sn_ptr_, sn_of_, sn_rows_ptr_, sn_rows_, sn_x_ptr_;
+  std::vector<Index> lo_p_, lo_r_, lo_pos_, diag_pos_;
+  std::vector<Scalar> sn_x_;
+  std::vector<Index> map_, head_, next_, dpos_;  // numeric workspaces
+  std::vector<Scalar> upd_, wbuf_;
+  Index max_rows_ = 0, max_width_ = 0;
   Index num_dyn_reg_ = 0, num_positive_ = 0;
   int last_refine_steps_ = 0;
 };

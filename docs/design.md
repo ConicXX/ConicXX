@@ -638,3 +638,75 @@ Consequences, in order of expected benefit:
 5. **ADMM break-even on domino:** a triangular solve pass costs a few ms against 60 ms per
    factorization, so the budget of a 10-iteration IPM solve is about 150-200 ADMM iterations. A
    warm-started ADMM at 1e-5 can stay within that, but not reliably.
+
+### Ordering experiment on the target scenes
+
+KKT matrices dumped in the middle of a solve (domino: n = 10,176, 40,596 cone rows; slinky: n = 4,956,
+4,950 compliant rows, 18,471 cone rows), factorized with `QuasiDefiniteLdlt` under different orderings
+(`QuasiDefiniteLdlt::analyzePattern(K, signs, perm)`):
+
+| Ordering | domino nnz(L) | domino flops | domino factorize | slinky nnz(L) | slinky flops | slinky factorize |
+|---|---|---|---|---|---|---|
+| A: AMD on the full KKT (current) | 1.74e6 | 3.4e8 | 64 ms | 7.9e5 | 3.9e7 | 9.4 ms |
+| B: cone rows first, AMD on the rest (body space) | 1.79e6 | 4.0e8 | 73 ms | 8.1e5 | 4.3e7 | 10.2 ms |
+| C: cone and compliant rows first (full body space) | - | - | - | 8.0e5 | 4.0e7 | 9.6 ms |
+| D: bodies and zero rows first, cones last (contact space, T11.5) | 1.6e7 | 1.3e10 | 3.9 s | 2.6e8 | 3.1e12 | (skipped) |
+
+(flops = sum of squared column counts of L; refined solves reach 1e-12 in all cases, no dynamic pivots.)
+
+- **AMD already finds an ordering as good as the body-space reduction**, although it interleaves
+  body and contact pivots. A body-space Cholesky (T8.1) would not save flops on these scenes; its
+  only advantage would be a Cholesky without pivot signs.
+- **The contact-space split (T11.5) is ruled out for these scenes**: the Delassus-like matrix is
+  essentially dense (domino 60x slower, slinky infeasible).
+- The simplicial factorization runs at 5.3 GFlop/s (domino) and 4.2 GFlop/s (slinky).
+- **Supernodes** (fundamental, AMD order): domino 14,901 for 50,772 columns, but 79 % of the flops are
+  in supernodes of width >= 32 (a dense trailing block among the bodies); slinky 11,815 for 28,377
+  columns with 59 % of the flops in widths 2 to 7 and 24 % in widths >= 32.
+
+Conclusion: the remaining lever on the factorization is a **supernodal LDL^T** (dense BLAS-3 kernels on
+the wide supernodes, dynamic regularization inside the dense diagonal-block factorization). Expected:
+large on domino, where the factorization is 78 % of the solve, modest on slinky.
+
+### Supernodal factorization
+
+`QuasiDefiniteLdlt` has a second numeric path (`Settings::supernodal`, default on, read at `setup()`):
+
+- **Supernodes.** After the ordering, the elimination tree is postordered (same fill) and fundamental
+  supernodes are formed: column j + 1 continues j's supernode if it is j's parent and its pattern is
+  j's without row j + 1. Every column's pattern is then the tail of its supernode's row list, so the
+  supernode is a dense column-major block whose columns map one to one onto the compressed L. The
+  triangular solves, the paired solve and refinement are unchanged.
+- **Numerics, left-looking.** A supernode assembles its columns of C (the pivots starting from the
+  static regularization), gathers the updates `L_d D_d L_d(cols)'` of every earlier supernode d
+  reaching into its columns (linked lists keyed by the next unapplied row), then factorizes its block:
+  panels of 32 columns, left-looking within a panel, one matrix product per panel for the trailing
+  columns. Pivot signs, static and dynamic regularization are exactly those of the simplicial path
+  (`setPivot()`); dynamic regularization still happens inside the numeric pass.
+- **Performance switches** (results do not depend on them): updates from supernodes narrower than 4
+  columns use scalar loops over the contiguous columns, wider ones a matrix product. A product with
+  inner dimension 1 cost more than it saved (RandomQP 200: 8.7 ms per factorization against 0.36 ms
+  with the scalar path). The supernodal path is taken only if L has at least 16 entries per column on
+  average; on very sparse factors (FrictionChainXL: 4 per column) the per-supernode overhead outweighs
+  the contiguous access (1.7 ms against 0.62 ms simplicial).
+
+Per factorization (identity scaling, `-march=native`):
+
+| Problem | nnz(L) | simplicial | supernodal |
+|---|---|---|---|
+| domino (dumped mid-solve) | 1.74e6 | 60 ms | 17.4 ms |
+| slinky (dumped mid-solve) | 7.9e5 | 9.1 ms | 6.8 ms |
+| RandomQP 200 | 9.99e4 | 3.7 ms | 0.35 ms |
+| GroupLasso 60x5 | 4.70e4 | 1.74 ms | 0.36 ms |
+| RandomSOCP 50x4 | 5.99e4 | 2.09 ms | 1.95 ms |
+| FrictionChainXL 264 | 1.61e5 | 0.62 ms | (falls back) |
+
+Benchmark suite (Release, without `-march=native`): iterations unchanged (635), solve time
+481 -> 262 ms; RandomQP/LP 200 2.8-3.9x, GroupLasso 60 1.95x, Portfolio 120 1.34x faster, the contact
+families unchanged (fallback or tiny), RandomSOCP about 10 % slower (open). CardilloCxx, same machine
+and binary apart from the switch: domino 831 -> 315 ms per step (10 steps), slinky 149 -> 115 ms per
+step (40 steps), iterations unchanged.
+
+With the factorization 2.6x faster on domino, the triangular solves (7.4 ms per pass against 17.4 ms
+per factorization) become the next cost to watch; a supernodal solve (dense blocks with BLAS-2/3)
+would follow the same structure.

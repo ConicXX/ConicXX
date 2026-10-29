@@ -123,6 +123,7 @@ void KktSystem::updateSettings(const Settings& settings) {
   ldlt_.params.refine_reltol = settings.refine_reltol;
   ldlt_.params.refine_abstol = settings.refine_abstol;
   ldlt_.params.refine_stop_ratio = std::max(settings.refine_stop_ratio, Scalar(1));
+  ldlt_.params.supernodal = settings.supernodal;  // takes effect at the next analyzePattern()
 }
 
 bool KktSystem::samePatterns(const SparseMat* P_upper, const SparseMat* A) const {

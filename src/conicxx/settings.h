@@ -51,6 +51,10 @@ struct Settings {
 
   RegularizationSettings regularization;
 
+  /// Supernodal LDL^T of the KKT matrix: dense matrix-product kernels for columns with nested
+  /// patterns; the same factor as the simplicial one up to roundoff. Read at setup().
+  bool supernodal = true;
+
   // --- Iterative refinement of every KKT solve, against the exact KKT matrix ---
   int refine_max_iter = 10;
   Scalar refine_reltol = 1e-13;  ///< relative to ||rhs||_inf
