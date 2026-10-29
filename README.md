@@ -6,7 +6,7 @@ It implements a primal-dual interior-point method with:
 - Nesterov–Todd scaling
 - Mehrotra predictor–corrector
 - Support for nonnegative and second-order cones
-- Symmetric KKT systems with regularization
+- Quasidefinite KKT systems with a built-in sparse LDLᵀ (pivot signs, static and dynamic regularization, iterative refinement)
 
 Built on Eigen, ConicXX is designed for research, prototyping, and high-performance applications,
 including as an embedded solver inside a per-timestep nonsmooth multibody simulation loop
@@ -38,6 +38,13 @@ subject to  Ax + s = b
 
 If `P = 0` the problem is a linear/conic program (LP/SOCP); a nonzero `P` makes it a QP/QCQP-style
 problem with conic constraints.
+
+Optionally, the equality (zero-cone) rows can be *compliant*: with `c >= 0` (one entry per zero-cone
+row, passed to `setup()`/`updateData()` as `zero_compliance`) the problem becomes
+`min (1/2) x'Px + q'x + (1/2) z_E' diag(c) z_E` s.t. `A x - diag(c) z_E + s = b`, where `z_E` are the
+multipliers of these rows. This is the elimination of extra variables `pi = -z_E` with cost
+`(1/2) pi' diag(c) pi` and rows `A_E x + diag(c) pi = b_E` (springs and dampers in multibody dynamics),
+without adding them to the problem. `c_i = 0` is an ordinary equality.
 
 ### The cone product `K`
 
@@ -140,6 +147,9 @@ Useful options: `CONICXX_BUILD_SHARED`, `CONICXX_BUILD_TESTS`, `CONICXX_BUILD_EX
 `examples/friction_contact_demo.cpp` for a minimal usage example (a QP-regularized contact force
 projected onto a Coulomb friction cone, solved once per "timestep" via `Solver::updateData`).
 
+Sources and headers sit side by side in `src/conicxx/`; only `solver.h`, `settings.h`, `solution.h`,
+`cone_spec.h`, `types.h`, `convert.h` and the generated `version.h` are installed.
+
 Consume from another CMake project via `find_package(conicxx CONFIG REQUIRED)`,
 `add_subdirectory`, or `FetchContent` -- all three expose the same `conicxx::conicxx` target.
 
@@ -179,4 +189,4 @@ real algorithmic difference, not sampling noise.
 ## License
 
 GPL-3.0, see [LICENSE](LICENSE). See [NOTICE](NOTICE) for third-party attributions
-(conicxx links QDLDL, Apache-2.0, and one file adapts part of it).
+(the sparse LDLᵀ factorization follows QDLDL's algorithm, Apache-2.0).

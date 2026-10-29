@@ -10,8 +10,8 @@ Solver::Solver(Solver&&) noexcept = default;
 Solver& Solver::operator=(Solver&&) noexcept = default;
 
 bool Solver::setup(const SparseMat& P, const Vec& q, const SparseMat& A, const Vec& b,
-                   const ConeSpec& cone_spec, const Settings& settings) {
-  return impl_->setup(P, q, A, b, cone_spec, settings);
+                   const ConeSpec& cone_spec, const Settings& settings, const Vec* zero_compliance) {
+  return impl_->setup(P, q, A, b, cone_spec, settings, zero_compliance);
 }
 
 bool Solver::setup(const Mat& P, const Vec& q, const SparseMat& A, const Vec& b,
@@ -29,8 +29,9 @@ bool Solver::setup(const Mat& P, const Vec& q, const Mat& A, const Vec& b,
   return setup(toSparseUpperTriangular(P, "P"), q, toSparse(A, "A"), b, cone_spec, settings);
 }
 
-bool Solver::updateData(const SparseMat* P, const Vec* q, const SparseMat* A, const Vec* b) {
-  return impl_->updateData(P, q, A, b);
+bool Solver::updateData(const SparseMat* P, const Vec* q, const SparseMat* A, const Vec* b,
+                        const Vec* zero_compliance) {
+  return impl_->updateData(P, q, A, b, zero_compliance);
 }
 
 void Solver::setWarmStart(const Vec& x, const Vec& s, const Vec& z) {

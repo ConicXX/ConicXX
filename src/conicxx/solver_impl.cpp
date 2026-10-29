@@ -2,11 +2,34 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <limits>
 
 namespace conicxx::detail {
 
+namespace {
+bool validCompliance(const Vec* c, Index zero_dim) {
+  return !c || (c->size() == zero_dim && c->allFinite() && (c->array() >= 0).all());
+}
+
+bool finiteData(const SparseMat* P, const Vec* q, const SparseMat* A, const Vec* b) {
+  const auto finiteValues = [](const SparseMat* M) {
+    if (!M) return true;
+    for (Index c = 0; c < M->outerSize(); ++c) {
+      for (SparseMat::InnerIterator it(*M, c); it; ++it) {
+        if (!std::isfinite(it.value())) return false;
+      }
+    }
+    return true;
+  };
+  return finiteValues(P) && finiteValues(A) && (!q || q->allFinite()) && (!b || b->allFinite());
+}
+}  // namespace
+
 bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, const Vec& b,
-                       const ConeSpec& cone_spec, const Settings& settings) {
+                       const ConeSpec& cone_spec, const Settings& settings,
+                       const Vec* zero_compliance) {
+  const auto setup_start = std::chrono::steady_clock::now();
   setup_done_ = false;
   if (!cone_spec.isValid()) return false;
   if (P.rows() != P.cols()) return false;
@@ -14,6 +37,8 @@ bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, con
   n_ = static_cast<Index>(P.rows());
   m_ = cone_spec.totalDim();
   if (A.rows() != m_ || A.cols() != n_ || b.size() != m_ || q.size() != n_) return false;
+  if (settings.validate_inputs && !finiteData(&P, &q, &A, &b)) return false;
+  if (!validCompliance(zero_compliance, cone_spec.zero_dim)) return false;
 
   cone_spec_ = cone_spec;
   settings_ = settings;
@@ -23,14 +48,19 @@ bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, con
   q_ = q;
   A_ = A;
   b_ = b;
+  P_.makeCompressed();
+  A_.makeCompressed();
 
   equil_ = Equilibration();
-  if (settings_.equilibrate) {
-    equil_.compute(P_, q_, A_, b_, *cones_, settings_);
+  equilibrated_ = settings_.equilibrate;
+  if (equilibrated_) {
+    equil_.compute(P_, q_, A_, b_, zero_compliance ? *zero_compliance : Vec(), *cones_, settings_);
     equil_.scaleProblem(P_, q_, A_, b_);
   }
 
   if (!kkt_.setup(P_, A_, *cones_, settings_)) return false;
+  setCompliance(zero_compliance);
+  Cz_ = Vec::Zero(cone_spec_.zero_dim);
 
   cacheEquilibrationWeights();
   cacheUnscaledDataNorms(/*b_changed=*/true, /*q_changed=*/true);
@@ -53,6 +83,8 @@ bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, con
 
   kkt_rhs_.resize(n_ + m_);
   kkt_sol_.resize(n_ + m_);
+  kkt_rhs_aff_.resize(n_ + m_);
+  kkt_sol_aff_.resize(n_ + m_);
   Pmul_scratch_.resize(n_);
   xi_scratch_.resize(n_);
   xi_minus_x1_scratch_.resize(n_);
@@ -83,64 +115,75 @@ bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, con
   sol_z_scratch_.resize(m_);
 
   have_warm_start_ = false;
+  have_cold_merit_ = false;
   solution_ = Solution{};
   setup_done_ = true;
+  setup_time_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - setup_start).count();
   return true;
 }
 
-bool SolverImpl::updateData(const SparseMat* P, const Vec* q, const SparseMat* A, const Vec* b) {
+bool SolverImpl::updateData(const SparseMat* P, const Vec* q, const SparseMat* A, const Vec* b,
+                            const Vec* zero_compliance) {
   if (!setup_done_) return false;
+  if (settings_.validate_inputs && !finiteData(P, q, A, b)) return false;
+  if (!validCompliance(zero_compliance, cone_spec_.zero_dim)) return false;
+  if (P && (P->rows() != n_ || P->cols() != n_)) return false;
+  if (A && (A->rows() != m_ || A->cols() != n_)) return false;
+  if (q && q->size() != n_) return false;
+  if (b && b->size() != m_) return false;
+  if (!kkt_.samePatterns(P, A)) return false;
 
-  SparseMat P_scaled, A_scaled;
-  Vec q_scaled, b_scaled;
-
+  // Same patterns: copy the values into the stored data and scale them in place.
   if (P) {
-    if (P->rows() != n_ || P->cols() != n_) return false;
-    P_scaled = *P;
-    if (settings_.equilibrate) equil_.scaleP(P_scaled);
+    std::copy(P->valuePtr(), P->valuePtr() + P->nonZeros(), P_.valuePtr());
+    if (equilibrated_) equil_.scaleP(P_);
   }
   if (A) {
-    if (A->rows() != m_ || A->cols() != n_) return false;
-    A_scaled = *A;
-    if (settings_.equilibrate) equil_.scaleA(A_scaled);
+    std::copy(A->valuePtr(), A->valuePtr() + A->nonZeros(), A_.valuePtr());
+    if (equilibrated_) equil_.scaleA(A_);
   }
   if (q) {
-    if (q->size() != n_) return false;
-    q_scaled = *q;
-    if (settings_.equilibrate) equil_.scaleQ(q_scaled);
+    q_ = *q;
+    if (equilibrated_) equil_.scaleQ(q_);
   }
   if (b) {
-    if (b->size() != m_) return false;
-    b_scaled = *b;
-    if (settings_.equilibrate) equil_.scaleB(b_scaled);
+    b_ = *b;
+    if (equilibrated_) equil_.scaleB(b_);
   }
-
-  if (!kkt_.updateData(P ? &P_scaled : nullptr, A ? &A_scaled : nullptr)) return false;
-
-  if (P) P_ = P_scaled;
-  if (A) A_ = A_scaled;
-  if (q) q_ = q_scaled;
-  if (b) b_ = b_scaled;
+  kkt_.updateData(P ? &P_ : nullptr, A ? &A_ : nullptr);
+  if (zero_compliance) setCompliance(zero_compliance);
 
   cacheUnscaledDataNorms(b != nullptr, q != nullptr);
   return true;
 }
 
+void SolverImpl::setCompliance(const Vec* zero_compliance) {
+  if (zero_compliance) {
+    compliance_ = *zero_compliance;
+    if (equilibrated_) equil_.scaleCompliance(compliance_);
+  } else {
+    compliance_.setZero(cone_spec_.zero_dim);
+  }
+  has_compliance_ = compliance_.size() > 0 && compliance_.maxCoeff() > 0;
+  kkt_.setZeroCompliance(compliance_);
+}
+
 void SolverImpl::setWarmStart(const Vec& x, const Vec& s, const Vec& z) {
-  if (!setup_done_) return;
+  if (!setup_done_ || x.size() != n_ || s.size() != m_ || z.size() != m_) return;
+  if (!x.allFinite() || !s.allFinite() || !z.allFinite()) return;
   warm_x_ = x;
   warm_s_ = s;
   warm_z_ = z;
-  if (settings_.equilibrate) equil_.scaleSolution(warm_x_, warm_s_, warm_z_);
+  if (equilibrated_) equil_.scaleSolution(warm_x_, warm_s_, warm_z_);
   have_warm_start_ = true;
 }
 
 void SolverImpl::cacheEquilibrationWeights() {
-  // Always valid regardless of settings_.equilibrate: d_eff_/e_eff_ are the real Ruiz weights
+  // Always valid regardless of equilibrated_: d_eff_/e_eff_ are the real Ruiz weights
   // when equilibration ran, or empty (meaning "identity", see weightedInfNorm) when it didn't --
   // every call site goes through weightedInfNorm() so this is the only place that branches on
-  // settings_.equilibrate for this purpose.
-  if (settings_.equilibrate) {
+  // equilibrated_ for this purpose.
+  if (equilibrated_) {
     d_eff_ = equil_.d();
     e_eff_ = equil_.e();
     dinv_eff_ = d_eff_.cwiseInverse();
@@ -155,10 +198,10 @@ void SolverImpl::cacheEquilibrationWeights() {
   }
 }
 
-Scalar SolverImpl::weightedInfNorm(const Vec& v, const Vec& weights) {
+Scalar SolverImpl::weightedInfNorm(const Eigen::Ref<const Vec>& v, const Vec& weights) {
   if (v.size() == 0) return 0.0;
   if (weights.size() == 0) return v.cwiseAbs().maxCoeff();  // equilibrate == false: identity
-  return (v.array() * weights.array()).abs().maxCoeff();
+  return (v.array() * weights.head(v.size()).array()).abs().maxCoeff();
 }
 
 void SolverImpl::cacheUnscaledDataNorms(bool b_changed, bool q_changed) {
@@ -182,49 +225,20 @@ void SolverImpl::shiftToInteriorCold(Eigen::Ref<Vec> v) const {
   }
 }
 
-void SolverImpl::recenterWarmStart(Eigen::Ref<Vec> s, Eigen::Ref<Vec> z) const {
-  // Step 1: the smallest shift making both strictly interior, scaled to each vector's own
-  // typical magnitude (pos_margin/deg) with a small coefficient -- deliberately *not*
-  // shiftToInteriorCold()'s bigger target (coefficient 0.1, absolute floor 1.0): a warm point is
-  // presumably already close to a good solution, so a shift sized for "no better information to
-  // start from" measurably hurt it in practice (caught by test_warm_start.cpp: it made warm
-  // starts need *more* iterations than cold on average for small perturbations, the opposite of
-  // the point of warm-starting). Small enough to preserve the warm point's structure, but not a
-  // fixed absolute epsilon either -- Phase 3 hit real trouble from exactly that (see
-  // test_update_reuse.cpp), since the step-length centrality safeguard checks margin against
-  // theta*mu, not an absolute constant.
-  const auto shiftMinimal = [this](Eigen::Ref<Vec> v) {
-    const auto [min_margin, pos_margin] = cones_->margins(v);
-    const Scalar deg = static_cast<Scalar>(std::max(cones_->degree(), Index(1)));
-    const Scalar target = std::max(Scalar(1e-2), Scalar(0.01) * pos_margin / deg);
-    if (min_margin <= 0.0) {
-      cones_->scaledUnitShift(v, -min_margin);
-      cones_->scaledUnitShift(v, target);
-    } else if (min_margin < target) {
-      cones_->scaledUnitShift(v, target - min_margin);
-    }
-  };
-  shiftMinimal(s);
-  shiftMinimal(z);
-
-  // Step 2: rescale (s, z) uniformly by rho so that, with tau=1 and kappa=warm_mu0 fixed,
-  // mu = (s'z + kappa)/(deg+1) hits warm_mu0 exactly. Solving for rho:
-  //   (rho^2 * s'z_current + warm_mu0) / (deg+1) = warm_mu0
-  //   rho = sqrt(warm_mu0 * deg / s'z_current)
-  const Scalar deg = static_cast<Scalar>(cones_->degree());
-  const Scalar sz = s.dot(z);
-  if (deg > 0.0 && sz > 0.0 && std::isfinite(sz)) {
-    const Scalar rho = std::sqrt(settings_.warm_mu0 * deg / sz);
-    s *= rho;
-    z *= rho;
-  }
+void SolverImpl::recenterWarmStart(Eigen::Ref<Vec> x, Eigen::Ref<Vec> s, Eigen::Ref<Vec> z) const {
+  const Scalar lambda = std::clamp(settings_.warm_lambda, Scalar(0), Scalar(1) - Scalar(1e-12));
+  x *= lambda;
+  s *= lambda;
+  z *= lambda;
+  cones_->scaledUnitShift(s, 1.0 - lambda);
+  cones_->scaledUnitShift(z, 1.0 - lambda);
 }
 
 bool SolverImpl::computeInitialPoint() {
   cones_->updateScaling(cones_->identityElement(), cones_->identityElement());
   if (!kkt_.updateScalingAndFactorize(*cones_)) return false;
 
-  if (P_.nonZeros() == 0) {
+  if (P_.nonZeros() == 0 && !has_compliance_) {
     kkt_rhs_.head(n_).setZero();
     kkt_rhs_.tail(m_) = b_;
     kkt_.solve(kkt_rhs_, kkt_sol_);
@@ -259,9 +273,13 @@ bool SolverImpl::refactorizeForCurrentScaling() {
 }
 
 bool SolverImpl::computeConstantSolve() {
+  // The constant right-hand side (-q, b) and the affine one (rx, s - rz) share one pass over the
+  // factor; computeAffineStep() picks up the second solution from kkt_sol_aff_.
   kkt_rhs_.head(n_) = -q_;
   kkt_rhs_.tail(m_) = b_;
-  kkt_.solve(kkt_rhs_, kkt_sol_);
+  kkt_rhs_aff_.head(n_) = rx_;
+  kkt_rhs_aff_.tail(m_) = s_ - rz_;
+  kkt_.solvePair(kkt_rhs_, kkt_sol_, kkt_rhs_aff_, kkt_sol_aff_, settings_.refine_affine);
   x1_ = kkt_sol_.head(n_);
   z1_ = kkt_sol_.tail(m_);
   Pmul(x1_, Px1_);
@@ -278,6 +296,12 @@ void SolverImpl::computeResiduals() {
   dot_bz_ = b_.dot(z_);
   dot_sz_ = s_.dot(z_);
   dot_xPx_ = x_.dot(Px_);
+  if (has_compliance_) {
+    const Index nz = cone_spec_.zero_dim;
+    Cz_ = compliance_.cwiseProduct(z_.head(nz));
+    rz_.head(nz) -= Cz_;
+    dot_xPx_ += z_.head(nz).dot(Cz_);  // pi'C pi with pi = -z_E
+  }
   rtau_ = dot_qx_ + dot_bz_ + kappa_ + dot_xPx_ / tau_;
 }
 
@@ -285,19 +309,28 @@ Scalar SolverImpl::computeMu() const {
   return (dot_sz_ + tau_ * kappa_) / static_cast<Scalar>(cones_->degree() + 1);
 }
 
+Scalar SolverImpl::complianceCross(const Eigen::Ref<const Vec>& zv) const {
+  // zeta'C zv_E with zeta = z_E / tau: the pi part of xi'P xv in the tau elimination.
+  if (!has_compliance_) return 0;
+  return Cz_.dot(zv.head(cone_spec_.zero_dim)) / tau_;
+}
+
+Scalar SolverImpl::complianceDen() const {
+  // (zeta - z1_E)'C(zeta - z1_E) - z1_E'C z1_E = zeta'C zeta - 2 zeta'C z1_E.
+  if (!has_compliance_) return 0;
+  const auto zE = z_.head(cone_spec_.zero_dim);
+  return (zE.dot(Cz_) / tau_ - 2.0 * Cz_.dot(z1_.head(cone_spec_.zero_dim))) / tau_;
+}
+
 bool SolverImpl::computeAffineStep() {
-  // Two solves feed the tau/kappa elimination: the "variable" solve (xv,zv,
-  // fresh RHS below, recomputed for every affine/combined call) and the
-  // "constant" solve (x1_,z1_, RHS=(-q,b), cached once per iteration by
-  // computeConstantSolve()). tau_num uses the VARIABLE solve, tau_den uses
+  // Two solves feed the tau/kappa elimination: the "variable" solve (xv,zv, RHS (rx, s - rz),
+  // solved in computeConstantSolve() together with the constant one) and the "constant" solve
+  // (x1_,z1_, RHS=(-q,b), cached once per iteration by computeConstantSolve()). tau_num uses the VARIABLE solve, tau_den uses
   // the CONSTANT one -- this maps onto Clarabel's kktsystem.rs exactly,
   // where (confusingly) `self.x1/z1` denotes the per-call variable solve
   // and `self.x2/z2` denotes the constant one.
-  kkt_rhs_.head(n_) = rx_;
-  kkt_rhs_.tail(m_) = s_ - rz_;
-  kkt_.solve(kkt_rhs_, kkt_sol_);
-  const auto xv = kkt_sol_.head(n_);
-  const auto zv = kkt_sol_.tail(m_);
+  const auto xv = kkt_sol_aff_.head(n_);
+  const auto zv = kkt_sol_aff_.tail(m_);
   if (!xv.allFinite() || !zv.allFinite()) return false;
 
   const Scalar dtau_rhs = rtau_;
@@ -305,12 +338,14 @@ bool SolverImpl::computeAffineStep() {
   xi_scratch_ = x_ / tau_;
 
   Pmul(xv, Pmul_scratch_);
-  const Scalar tau_num = dtau_rhs - dkappa_rhs / tau_ + q_.dot(xv) + b_.dot(zv) +
-                          2.0 * xi_scratch_.dot(Pmul_scratch_);
   xi_minus_x1_scratch_ = xi_scratch_ - x1_;
+  const Scalar xi_P_xv = xi_scratch_.dot(Pmul_scratch_);
   Pmul(xi_minus_x1_scratch_, Pmul_scratch_);
+  const Scalar tau_num = dtau_rhs - dkappa_rhs / tau_ + q_.dot(xv) + b_.dot(zv) +
+                          2.0 * (xi_P_xv + complianceCross(zv));
   const Scalar tau_den = kappa_ / tau_ - q_.dot(x1_) - b_.dot(z1_) +
-                          xi_minus_x1_scratch_.dot(Pmul_scratch_) - x1_.dot(Px1_);
+                          xi_minus_x1_scratch_.dot(Pmul_scratch_) - x1_.dot(Px1_) +
+                          complianceDen();
   if (tau_den == 0.0 || !std::isfinite(tau_num) || !std::isfinite(tau_den)) return false;
 
   dtau_aff_ = tau_num / tau_den;
@@ -326,7 +361,7 @@ bool SolverImpl::computeAffineStep() {
          dz_aff_.allFinite() && ds_aff_.allFinite();
 }
 
-bool SolverImpl::computeCombinedStep(Scalar sigma, Scalar mu) {
+bool SolverImpl::computeCombinedStep(Scalar sigma, Scalar mu, Scalar corrector_scale) {
   dz_table_ = (1.0 - sigma) * rz_;
 
   cones_->applyW(z_, lambda_);
@@ -335,6 +370,7 @@ bool SolverImpl::computeCombinedStep(Scalar sigma, Scalar mu) {
   cones_->applyWInv(ds_aff_, Winv_ds_aff_);
   cones_->applyW(dz_aff_, W_dz_aff_);
   cones_->product(Winv_ds_aff_, W_dz_aff_, corrector_);
+  if (corrector_scale != 1.0) corrector_ *= corrector_scale;
 
   ds_combined_ = lambda_prod_ + corrector_ - sigma * mu * cones_->identityElement();
 
@@ -349,16 +385,18 @@ bool SolverImpl::computeCombinedStep(Scalar sigma, Scalar mu) {
   if (!xv.allFinite() || !zv.allFinite()) return false;
 
   const Scalar dtau_rhs = (1.0 - sigma) * rtau_;
-  const Scalar dkappa_rhs = tau_ * kappa_ + dtau_aff_ * dkappa_aff_ - sigma * mu;
+  const Scalar dkappa_rhs = tau_ * kappa_ + corrector_scale * dtau_aff_ * dkappa_aff_ - sigma * mu;
 
   xi_scratch_ = x_ / tau_;
   Pmul(xv, Pmul_scratch_);
-  const Scalar tau_num = dtau_rhs - dkappa_rhs / tau_ + q_.dot(xv) + b_.dot(zv) +
-                          2.0 * xi_scratch_.dot(Pmul_scratch_);
   xi_minus_x1_scratch_ = xi_scratch_ - x1_;
+  const Scalar xi_P_xv = xi_scratch_.dot(Pmul_scratch_);
   Pmul(xi_minus_x1_scratch_, Pmul_scratch_);
+  const Scalar tau_num = dtau_rhs - dkappa_rhs / tau_ + q_.dot(xv) + b_.dot(zv) +
+                          2.0 * (xi_P_xv + complianceCross(zv));
   const Scalar tau_den = kappa_ / tau_ - q_.dot(x1_) - b_.dot(z1_) +
-                          xi_minus_x1_scratch_.dot(Pmul_scratch_) - x1_.dot(Px1_);
+                          xi_minus_x1_scratch_.dot(Pmul_scratch_) - x1_.dot(Px1_) +
+                          complianceDen();
   if (tau_den == 0.0 || !std::isfinite(tau_num) || !std::isfinite(tau_den)) return false;
 
   dtau_ = tau_num / tau_den;
@@ -385,42 +423,27 @@ Scalar SolverImpl::computeStepLength(const Vec& ds, const Vec& dz, Scalar dtau,
 }
 
 Scalar SolverImpl::safeguardedStepLength(Scalar alpha_max) const {
-  Scalar alpha = alpha_max;
+  // Backtrack until the trial point is strictly interior and every complementarity pair (each cone
+  // block and tau*kappa) has centrality >= centrality_theta * mu_trial. The centrality is evaluated
+  // exactly at the trial point (ConeBase::centrality), not through the current scaling W.
   const Scalar deg1 = static_cast<Scalar>(cones_->degree() + 1);
-  // 0.8^64 ~ 6e-7, well past min_terminate_step_length's default (1e-4) for any reasonable
-  // linesearch_backtrack -- this loop always terminates via the caller's tiny-step check, not by
-  // exhausting attempts on a problem that could still make progress with a smaller backtrack.
+  const bool has_cones = cones_->degree() > 0;
+  Scalar alpha = alpha_max;
   constexpr int kMaxBacktracks = 64;
-  for (int attempt = 0; attempt < kMaxBacktracks; ++attempt) {
+  for (int attempt = 0; attempt < kMaxBacktracks; ++attempt, alpha *= settings_.linesearch_backtrack) {
     const Scalar tau_trial = tau_ + alpha * dtau_;
     const Scalar kappa_trial = kappa_ + alpha * dkappa_;
-    if (tau_trial > 0.0 && kappa_trial > 0.0) {
-      s_trial_ = s_ + alpha * ds_;
-      z_trial_ = z_ + alpha * dz_;
-      const auto [min_margin_s, pos_s] = cones_->margins(s_trial_);
-      const auto [min_margin_z, pos_z] = cones_->margins(z_trial_);
-      (void)pos_s;
-      (void)pos_z;
-      if (min_margin_s > 0.0 && min_margin_z > 0.0) {
-        // Checked against mu_trial (this trial point's own mu), not the pre-step mu: a full,
-        // legitimate Mehrotra step is *expected* to shrink mu substantially (that's the point of
-        // taking it), so checking the resulting lambda's centrality against the old, much larger
-        // mu would reject perfectly good aggressive steps, not just genuinely bad ones -- this is
-        // the standard "neighborhood of the central path" formulation (N_-infinity(gamma) and
-        // similar), where membership is always evaluated at the same point as the mu it's
-        // compared against, not a stale one.
-        const Scalar mu_trial = (s_trial_.dot(z_trial_) + tau_trial * kappa_trial) / deg1;
-        // lambda = W * z_trial, using this iteration's already-computed NT scaling (from
-        // refactorizeForCurrentScaling()'s updateScaling() call) -- cheap, and a good enough
-        // proxy for the trial point's centrality without recomputing a fresh NT scaling for
-        // every backtrack attempt.
-        cones_->applyW(z_trial_, lambda_trial_);
-        if (cones_->minCentrality(lambda_trial_) >= settings_.centrality_theta * mu_trial) {
-          return alpha;
-        }
-      }
+    if (!(tau_trial > 0.0) || !(kappa_trial > 0.0)) continue;
+    s_trial_ = s_ + alpha * ds_;
+    z_trial_ = z_ + alpha * dz_;
+    if (has_cones && (!(cones_->margins(s_trial_).first > 0.0) || !(cones_->margins(z_trial_).first > 0.0))) {
+      continue;
     }
-    alpha *= settings_.linesearch_backtrack;
+    const Scalar mu_trial = (s_trial_.dot(z_trial_) + tau_trial * kappa_trial) / deg1;
+    const Scalar bound = settings_.centrality_theta * mu_trial;
+    if (tau_trial * kappa_trial >= bound && cones_->minCentrality(s_trial_, z_trial_) >= bound) {
+      return alpha;
+    }
   }
   return alpha;
 }
@@ -479,16 +502,19 @@ SolverImpl::Metrics SolverImpl::computeMetrics() const {
   // rz_inf =  Ax+s = rz_ + tau*b_      (since rz_ =  Ax + s - tau*b).
   rx_inf_ = rx_ + Px_ + tau_ * q_;
   rz_inf_ = rz_ + tau_ * b_;
-  m.res_primal_inf =
-      cinv_ * weightedInfNorm(rx_inf_, dinv_eff_) / std::max(Scalar(1.0), normz_direct);
+  // With compliance the eliminated columns of pi add C z_E (unscaled: E^-1 C_hat z_hat_E) to
+  // A'z and, with pi = -z_E, to P x.
+  const Scalar Cz_norm = has_compliance_ ? weightedInfNorm(Cz_, einv_eff_) : Scalar(0);
+  m.res_primal_inf = std::max(cinv_ * weightedInfNorm(rx_inf_, dinv_eff_), Cz_norm) /
+                     std::max(Scalar(1.0), normz_direct);
   m.res_dual_inf = std::max(
-      cinv_ * weightedInfNorm(Px_, dinv_eff_) / std::max(Scalar(1.0), normx_direct),
+      std::max(cinv_ * weightedInfNorm(Px_, dinv_eff_), Cz_norm) / std::max(Scalar(1.0), normx_direct),
       weightedInfNorm(rz_inf_, einv_eff_) / std::max(Scalar(1.0), normx_direct + norms_direct));
 
   m.dot_bz = cinv_ * dot_bz_;
   m.dot_qx = cinv_ * dot_qx_;
 
-  m.merit = std::max({m.res_primal, m.res_dual, std::abs(m.gap_abs)});
+  m.merit = std::max({m.res_primal, m.res_dual, std::min(m.gap_abs, m.gap_rel)});
   return m;
 }
 
@@ -540,9 +566,9 @@ void SolverImpl::finalizeSolution(Status status, const Metrics& m, Scalar mu) {
   // T4.2, rather than the ordinary 1/tau (resp. 1/kappa) scale used for an actual solution.
   Scalar scale;
   if (primal_inf) {
-    scale = -1.0 / (cinv_ * dot_bz_);
+    scale = -1.0 / m.dot_bz;
   } else if (dual_inf) {
-    scale = -1.0 / (cinv_ * dot_qx_);
+    scale = -1.0 / m.dot_qx;
   } else {
     scale = 1.0 / std::max(tau_, Scalar(1e-30));
   }
@@ -550,7 +576,7 @@ void SolverImpl::finalizeSolution(Status status, const Metrics& m, Scalar mu) {
   sol_x_scratch_ = x_ * scale;
   sol_s_scratch_ = s_ * scale;
   sol_z_scratch_ = z_ * scale;
-  if (settings_.equilibrate) equil_.unscaleSolution(sol_x_scratch_, sol_s_scratch_, sol_z_scratch_);
+  if (equilibrated_) equil_.unscaleSolution(sol_x_scratch_, sol_s_scratch_, sol_z_scratch_);
 
   solution_.x = sol_x_scratch_;
   solution_.s = sol_s_scratch_;
@@ -563,21 +589,37 @@ void SolverImpl::finalizeSolution(Status status, const Metrics& m, Scalar mu) {
   solution_.info.mu = mu;
   solution_.info.kkt_refinement_residual = kkt_.lastRefinementResidual();
   solution_.info.equality_rank_deficient = kkt_.equalityRankDeficient();
+  solution_.info.kkt_factorizations = kkt_.stats().factorizations;
+  solution_.info.kkt_dynamic_reg_pivots = kkt_.stats().dynamic_reg_pivots;
+  solution_.info.kkt_refinement_steps = kkt_.stats().refinement_steps;
   solution_.info.merit = m.merit;
+  solution_.info.setup_time_s = setup_time_s_;
+  solution_.info.solve_time_s =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count();
+}
+
+Scalar SolverImpl::startFromWarmTrial() {
+  cones_->zeroPrimalZeroConeBlocks(warm_s_trial_);
+  cones_->projectOntoCones(warm_s_trial_);  // a user-supplied warm start need not be feasible
+  cones_->projectOntoCones(warm_z_trial_);
+  recenterWarmStart(warm_x_trial_, warm_s_trial_, warm_z_trial_);
+  x_ = warm_x_trial_;
+  s_ = warm_s_trial_;
+  z_ = warm_z_trial_;
+  tau_ = 1.0;
+  kappa_ = warmKappa();
+  computeResiduals();
+  return computeMetrics().merit;
 }
 
 const Solution& SolverImpl::solve() {
-  // Resetting the scalar/status fields is enough to make this call's solution_ independent of any
-  // prior one -- every return path below calls finalizeSolution(), which unconditionally
-  // overwrites x/s/z, except the setup_done_ guard just below, which clears them explicitly. A
-  // full `solution_ = Solution{}` would also discard x/s/z's already-allocated capacity, forcing
-  // a fresh heap allocation on every solve() call instead of just the first one (T7.1).
   solution_.status = Status::Unsolved;
   solution_.objective = 0;
   solution_.info = Info{};
   consecutive_tiny_steps_ = 0;
   have_best_ = false;
   solve_start_ = std::chrono::steady_clock::now();
+  kkt_.resetStats();
   if (!setup_done_) {
     solution_.status = Status::NumericalError;
     solution_.x.resize(0);
@@ -585,74 +627,76 @@ const Solution& SolverImpl::solve() {
     solution_.z.resize(0);
     return solution_;
   }
+  kkt_.updateSettings(settings_);  // runtime settings may have changed through setSettings()
+  const int verbose = settings_.verbose;
+  if (verbose >= 1) {
+    std::printf("conicxx: n = %d, m = %d (%d zero, %d nonneg, %d soc blocks), nnz(L) = %d\n",
+                static_cast<int>(n_), static_cast<int>(m_), static_cast<int>(cone_spec_.zero_dim),
+                static_cast<int>(cone_spec_.nonneg_dim),
+                static_cast<int>(cone_spec_.soc_dims.size()),
+                static_cast<int>(kkt_.ldlt().nonZerosL()));
+  }
 
+  // Starting point. A warm start (recentered previous solution) is used directly if its merit is
+  // not above the merit of the last cold start; only otherwise is the cold start computed (one
+  // factorization, two solves) and the better point kept.
   const bool use_warm = settings_.warm_start && have_warm_start_;
+  Scalar warm_merit = std::numeric_limits<Scalar>::infinity();
+  bool started = false;
   if (use_warm) {
-    // T5.2: recenter the captured warm point (shift to strictly interior, rescale to hit
-    // warm_mu0), then compare its residuals against a fresh cold start and keep whichever is
-    // better -- an uncentered warm start, or one carried over from a since-substantially-changed
-    // problem, should never end up worse than just starting cold.
     warm_x_trial_ = warm_x_;
     warm_s_trial_ = warm_s_;
     warm_z_trial_ = warm_z_;
-    cones_->zeroPrimalZeroConeBlocks(warm_s_trial_);
-    recenterWarmStart(warm_s_trial_, warm_z_trial_);
-    const Scalar tau_w = 1.0, kappa_w = settings_.warm_mu0;
-
-    x_ = warm_x_trial_;
-    s_ = warm_s_trial_;
-    z_ = warm_z_trial_;
-    tau_ = tau_w;
-    kappa_ = kappa_w;
-    computeResiduals();
-    const Scalar warm_merit = computeMetrics().merit;
-
+    warm_merit = startFromWarmTrial();
+    started = have_cold_merit_ && warm_merit <= cold_merit_;
+  }
+  if (!started) {
     if (!computeInitialPoint()) {
       solution_.status = Status::NumericalError;
-      solution_.info.iterations = 0;
       computeResiduals();
       finalizeSolution(Status::NumericalError, computeMetrics(), computeMu());
       return solution_;
     }
     computeResiduals();
-    const Scalar cold_merit = computeMetrics().merit;
-
-    if (warm_merit <= cold_merit) {
+    cold_merit_ = computeMetrics().merit;
+    have_cold_merit_ = true;
+    if (use_warm && warm_merit <= cold_merit_) {
       x_ = warm_x_trial_;
       s_ = warm_s_trial_;
       z_ = warm_z_trial_;
-      tau_ = tau_w;
-      kappa_ = kappa_w;
+      tau_ = 1.0;
+      kappa_ = warmKappa();
+      started = true;
     }
-    // else: keep the cold-start point computeInitialPoint() just left in x_/s_/z_/tau_/kappa_.
-  } else if (!computeInitialPoint()) {
-    solution_.status = Status::NumericalError;
-    solution_.info.iterations = 0;
-    computeResiduals();
-    finalizeSolution(Status::NumericalError, computeMetrics(), computeMu());
-    return solution_;
   }
 
+  const bool warm_used = started;
+  const Scalar warm_merit_reported = use_warm ? warm_merit : Scalar(0);
+  const Scalar cold_merit_reported = have_cold_merit_ ? cold_merit_ : Scalar(0);
   Status final_status = Status::MaxIterations;
   int iterations = 0;
-
-  // kappa/tau must clear this before infeasibility certificates are even considered -- matches
-  // Clarabel's actual gate (docs/design.md "Termination and infeasibility" explains why this
-  // deviates from the task list's own plain-English paraphrase, resolved in Clarabel's favor).
+  // Infeasibility certificates are only considered once kappa/tau exceeds this (Clarabel's gate).
   const Scalar infeas_ktratio_gate = (1.0 / settings_.tol_ktratio) * 1000.0;
+  const Scalar eps = std::numeric_limits<Scalar>::epsilon();
+  Metrics prev;
+  Scalar alpha = 0, sigma = 0;
+  if (verbose >= 2) {
+    std::printf("iter     pcost          dcost         gap      pres     dres     k/t      mu       "
+                "step    sigma\n");
+  }
 
   for (int iter = 0; iter < settings_.max_iter; ++iter) {
     iterations = iter + 1;
 
-    if (!refactorizeForCurrentScaling() || !computeConstantSolve()) {
-      final_status = Status::NumericalError;
-      break;
-    }
+    // Termination checks first: they need no factorization, so the final iteration costs none.
     computeResiduals();
-
     const Metrics m = computeMetrics();
     const Scalar mu = computeMu();
     updateBestIterate(m);
+    if (verbose >= 2) {
+      std::printf("%4d  %+.6e  %+.6e  %.2e %.2e %.2e %.2e %.2e  %.4f  %.4f\n", iter, m.cost_primal,
+                  m.cost_dual, m.gap_abs, m.res_primal, m.res_dual, m.ktratio, mu, alpha, sigma);
+    }
 
     if (isSolved(m, settings_.tol_feas, settings_.tol_gap_abs, settings_.tol_gap_rel)) {
       final_status = Status::Solved;
@@ -668,6 +712,21 @@ const Solution& SolverImpl::solve() {
         break;
       }
     }
+    // Progress check (Clarabel): a residual grew, and either the iterate is already accurate
+    // (kappa/tau ~ 0 with a converged gap) or a residual exploded by 100x above the tolerance.
+    if (iter >= 2 && (m.res_dual > prev.res_dual || m.res_primal > prev.res_primal)) {
+      const bool stalled = m.ktratio < 100 * eps &&
+                           (prev.gap_abs < settings_.tol_gap_abs || prev.gap_rel < settings_.tol_gap_rel);
+      const bool diverging =
+          m.ktratio < 1.0 &&
+          ((m.res_dual > 100 * settings_.tol_feas && m.res_dual > 100 * prev.res_dual) ||
+           (m.res_primal > 100 * settings_.tol_feas && m.res_primal > 100 * prev.res_primal));
+      if (stalled || diverging) {
+        final_status = Status::InsufficientProgress;
+        break;
+      }
+    }
+    prev = m;
 
     const double elapsed_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count();
@@ -676,7 +735,7 @@ const Solution& SolverImpl::solve() {
       break;
     }
 
-    if (!computeAffineStep()) {
+    if (!refactorizeForCurrentScaling() || !computeConstantSolve() || !computeAffineStep()) {
       final_status = Status::NumericalError;
       break;
     }
@@ -688,16 +747,17 @@ const Solution& SolverImpl::solve() {
     const Scalar kappa_aff = kappa_ + alpha_aff * dkappa_aff_;
     const Scalar mu_aff = (s_aff_scratch_.dot(z_aff_scratch_) + tau_aff * kappa_aff) /
                           static_cast<Scalar>(cones_->degree() + 1);
-
-    Scalar sigma;
     if (mu > 0) {
       const Scalar ratio = std::max(mu_aff / mu, Scalar(0.0));
-      sigma = std::min(std::max(ratio * ratio * ratio, Scalar(0.0)), Scalar(1.0));
+      sigma = std::min(ratio * ratio * ratio, Scalar(1.0));
     } else {
       sigma = 1.0;
     }
 
-    if (!computeCombinedStep(sigma, mu)) {
+    // Reduced Mehrotra correction in the first iteration (Clarabel): the starting point, cold or
+    // warm, may be badly centred.
+    const Scalar corrector_scale = iter == 0 ? alpha_aff : Scalar(1);
+    if (!computeCombinedStep(sigma, mu, corrector_scale)) {
       final_status = Status::NumericalError;
       break;
     }
@@ -708,16 +768,14 @@ const Solution& SolverImpl::solve() {
       final_status = Status::NumericalError;
       break;
     }
-    const Scalar alpha = safeguardedStepLength(alpha_max);
+    alpha = safeguardedStepLength(alpha_max);
     if (!std::isfinite(alpha) || alpha <= 0.0) {
       final_status = Status::NumericalError;
       break;
     }
-
     if (alpha < settings_.min_terminate_step_length) {
       if (++consecutive_tiny_steps_ >= 2) {
         final_status = Status::InsufficientProgress;
-        addStep(alpha);  // still take it -- the best available iterate is better than the last
         break;
       }
     } else {
@@ -728,60 +786,54 @@ const Solution& SolverImpl::solve() {
     maybeRescale();
   }
 
-  // For statuses that report the best iterate seen (not the last one), restore it and its
-  // cached metrics now, and check whether it actually meets the reduced ("almost") tolerances --
-  // if so, upgrade to the matching Almost* status (T4.3).
+  // MaxIterations/MaxTime/InsufficientProgress report the best iterate, upgraded to an Almost*
+  // status if it meets the reduced tolerances.
   Metrics final_metrics;
   Scalar final_mu;
-  if (final_status == Status::MaxIterations || final_status == Status::MaxTime ||
-      final_status == Status::InsufficientProgress) {
-    if (have_best_) {
-      restoreBestIterate();
-      final_metrics = best_metrics_;
-      final_mu = best_mu_;
-      if (isSolved(final_metrics, settings_.reduced_tol_feas, settings_.reduced_tol_gap_abs,
-                   settings_.reduced_tol_gap_rel)) {
-        final_status = Status::AlmostSolved;
-      } else if (final_metrics.ktratio > (1.0 / settings_.reduced_tol_ktratio) * 1000.0) {
-        if (isPrimalInfeasible(final_metrics, settings_.reduced_tol_infeas_abs,
-                               settings_.reduced_tol_infeas_rel)) {
-          final_status = Status::AlmostPrimalInfeasible;
-        } else if (isDualInfeasible(final_metrics, settings_.reduced_tol_infeas_abs,
-                                    settings_.reduced_tol_infeas_rel)) {
-          final_status = Status::AlmostDualInfeasible;
-        }
+  if ((final_status == Status::MaxIterations || final_status == Status::MaxTime ||
+       final_status == Status::InsufficientProgress) &&
+      have_best_) {
+    restoreBestIterate();
+    final_metrics = best_metrics_;
+    final_mu = best_mu_;
+    if (isSolved(final_metrics, settings_.reduced_tol_feas, settings_.reduced_tol_gap_abs,
+                 settings_.reduced_tol_gap_rel)) {
+      final_status = Status::AlmostSolved;
+    } else if (final_metrics.ktratio > (1.0 / settings_.reduced_tol_ktratio) * 1000.0) {
+      if (isPrimalInfeasible(final_metrics, settings_.reduced_tol_infeas_abs,
+                             settings_.reduced_tol_infeas_rel)) {
+        final_status = Status::AlmostPrimalInfeasible;
+      } else if (isDualInfeasible(final_metrics, settings_.reduced_tol_infeas_abs,
+                                  settings_.reduced_tol_infeas_rel)) {
+        final_status = Status::AlmostDualInfeasible;
       }
-    } else {
-      // Shouldn't normally happen (the loop always calls updateBestIterate() before any break),
-      // but fall back to whatever the current (possibly stale, e.g. pre-first-iteration) state
-      // implies rather than leaving Metrics default/zero-initialized.
-      final_metrics = computeMetrics();
-      final_mu = computeMu();
     }
   } else {
-    // Solved / PrimalInfeasible / DualInfeasible / NumericalError: x_/s_/z_/tau_/kappa_ are
-    // exactly the point computeResiduals() last measured (no step taken since), so this is
-    // consistent, not stale.
+    // No step has been taken since the residuals were last computed.
     final_metrics = computeMetrics();
     final_mu = computeMu();
   }
 
   solution_.status = final_status;
   solution_.info.iterations = iterations;
+  solution_.info.warm_start_used = warm_used;
+  solution_.info.warm_start_merit = warm_merit_reported;
+  solution_.info.cold_start_merit = cold_merit_reported;
   finalizeSolution(final_status, final_metrics, final_mu);
 
   if (final_status == Status::Solved && settings_.warm_start) {
-    // T5.1: store x/tau, s/tau, z/tau (still in equilibrated units -- x_/s_/z_/tau_ here are the
-    // raw converged HSDE iterate, finalizeSolution() above only read them into local copies).
-    // Storing x_/s_/z_ directly (the old bug) was only correct when tau_ happened to converge to
-    // exactly 1, which it generally doesn't.
+    // Warm start for the next solve: x/tau, s/tau, z/tau in equilibrated units.
     const Scalar tau_inv = 1.0 / std::max(tau_, Scalar(1e-30));
     warm_x_ = x_ * tau_inv;
     warm_s_ = s_ * tau_inv;
     warm_z_ = z_ * tau_inv;
     have_warm_start_ = true;
   }
-
+  if (verbose >= 1) {
+    std::printf("conicxx: %s after %d iterations, %d factorizations, %d dynamic pivots, %.3f ms\n",
+                toString(final_status), iterations, kkt_.stats().factorizations,
+                kkt_.stats().dynamic_reg_pivots, 1e3 * solution_.info.solve_time_s);
+  }
   return solution_;
 }
 

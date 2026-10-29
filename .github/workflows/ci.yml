@@ -89,3 +89,29 @@ jobs:
 
       - name: Run benchmarks
         run: ctest --test-dir build -L benchmark --output-on-failure
+
+  install:
+    name: Install + find_package consumer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeigen3-dev g++
+
+      - name: Build and install
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCONICXX_BUILD_TESTS=OFF -DCONICXX_BUILD_BENCHMARKS=OFF -DCONICXX_BUILD_EXAMPLES=OFF
+          cmake --build build -j
+          cmake --install build --prefix "$PWD/prefix"
+
+      - name: Consumer project
+        run: |
+          mkdir consumer
+          printf 'cmake_minimum_required(VERSION 3.21)\nproject(consumer CXX)\nfind_package(conicxx CONFIG REQUIRED)\nadd_executable(c main.cpp)\ntarget_link_libraries(c conicxx::conicxx)\n' > consumer/CMakeLists.txt
+          printf '#include <conicxx/solver.h>\nint main() { conicxx::Solver s; return 0; }\n' > consumer/main.cpp
+          cmake -S consumer -B consumer/build -DCMAKE_PREFIX_PATH="$PWD/prefix"
+          cmake --build consumer/build
+          ./consumer/build/c

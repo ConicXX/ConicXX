@@ -1,6 +1,6 @@
 #include "problem_generators.h"
 
-#include <conicxx/cones/cone_set.h>
+#include <conicxx/cone_set.h>
 
 #include <cmath>
 #include <vector>
@@ -64,9 +64,8 @@ void makeFeasiblePrimalDualData(const SparseMat& P, const SparseMat& A, const Co
   const Vec x0 = randomUniform(n, rng, -1.0, 1.0);
   Vec s0 = Vec::Zero(m), z0 = Vec::Zero(m);
   for (Index i = 0; i < cones.numBlocks(); ++i) {
-    const ConeBase& blk = cones.block(i);
-    fillInteriorBlock(blk.type(), cones.blockOffset(i), blk.dim(), rng, s0);
-    fillInteriorBlock(blk.type(), cones.blockOffset(i), blk.dim(), rng, z0);
+    fillInteriorBlock(cones.blockType(i), cones.blockOffset(i), cones.blockDim(i), rng, s0);
+    fillInteriorBlock(cones.blockType(i), cones.blockOffset(i), cones.blockDim(i), rng, z0);
   }
 
   b_out = A * x0 + s0;

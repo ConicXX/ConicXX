@@ -1,12 +1,13 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 
 #include "conicxx/cone_spec.h"
-#include "conicxx/cones/cone_set.h"
-#include "conicxx/kkt/equilibration.h"
-#include "conicxx/kkt/kkt_system.h"
+#include "conicxx/cone_set.h"
+#include "conicxx/equilibration.h"
+#include "conicxx/kkt_system.h"
 #include "conicxx/settings.h"
 #include "conicxx/solution.h"
 #include "conicxx/types.h"
@@ -23,8 +24,9 @@ namespace conicxx::detail {
 class SolverImpl {
  public:
   bool setup(const SparseMat& P, const Vec& q, const SparseMat& A, const Vec& b,
-             const ConeSpec& cone_spec, const Settings& settings);
-  bool updateData(const SparseMat* P, const Vec* q, const SparseMat* A, const Vec* b);
+             const ConeSpec& cone_spec, const Settings& settings, const Vec* zero_compliance);
+  bool updateData(const SparseMat* P, const Vec* q, const SparseMat* A, const Vec* b,
+                  const Vec* zero_compliance);
   void setWarmStart(const Vec& x, const Vec& s, const Vec& z);
 
   void setSettings(const Settings& settings) { settings_ = settings; }
@@ -38,14 +40,15 @@ class SolverImpl {
   bool computeInitialPoint();
   void shiftToInteriorCold(Eigen::Ref<Vec> v) const;
 
-  /// T5.2: recenters a captured warm start (s, z) in place -- shifts both to a safely-interior
-  /// point (same shiftToInteriorCold() logic the cold start uses; superseded T3-era
-  /// ensureStrictlyInteriorWarm()'s fixed-epsilon margin, which Phase 3's centrality safeguard
-  /// already needed a bigger fix for once), then uniformly rescales (s, z) so that
-  /// mu = (s'z + tau*kappa)/(deg+1) hits Settings::warm_mu0 exactly with tau=1,
-  /// kappa=Settings::warm_mu0. Zero-cone s stays exactly 0 (scaledUnitShift()/scaling are both
-  /// no-ops there); zero-cone z is free and participates in the rescale like any other block.
-  void recenterWarmStart(Eigen::Ref<Vec> s, Eigen::Ref<Vec> z) const;
+  /// Warm start of the homogeneous embedding (Skajaa, Andersen, Ye 2013), applied after s and z
+  /// are projected onto the cones: the convex combination
+  /// lambda * (x, s, z) + (1 - lambda) * (0, e, e) of the previous solution and the standard start,
+  /// tau = 1, kappa = 1 - lambda. Zero-cone s stays 0. Residuals change by about lambda times the
+  /// data change, and every complementarity pair is at least (1 - lambda)^2.
+  /// Projects and recenters warm_*_trial_ (in place), makes it the iterate, returns its merit.
+  Scalar startFromWarmTrial();
+  Scalar warmKappa() const { return std::max(Scalar(1) - settings_.warm_lambda, Scalar(1e-12)); }
+  void recenterWarmStart(Eigen::Ref<Vec> x, Eigen::Ref<Vec> s, Eigen::Ref<Vec> z) const;
 
   // --- per-iteration pipeline ---
   bool refactorizeForCurrentScaling();
@@ -53,7 +56,12 @@ class SolverImpl {
   void computeResiduals();
   Scalar computeMu() const;
   bool computeAffineStep();
-  bool computeCombinedStep(Scalar sigma, Scalar mu);
+  /// Compliance terms of the tau elimination (0 without compliance), see the .cpp.
+  Scalar complianceCross(const Eigen::Ref<const Vec>& zv) const;
+  Scalar complianceDen() const;
+  /// corrector_scale multiplies the second-order (Mehrotra) term: the affine step length in the
+  /// first iteration (as in Clarabel), 1 afterwards.
+  bool computeCombinedStep(Scalar sigma, Scalar mu, Scalar corrector_scale);
   Scalar computeStepLength(const Vec& ds, const Vec& dz, Scalar dtau, Scalar dkappa) const;
 
   /// Backtracks alpha down from alpha_max (using ds_/dz_/dtau_/dkappa_, the combined step
@@ -88,14 +96,14 @@ class SolverImpl {
   // equilibrated/"hat" units; every formula below algebraically undoes that, verified against a
   // genuinely-reconstructed unscaled problem in test/solver/test_termination_unscaled.cpp).
 
-  /// Caches the always-valid (identity if !settings_.equilibrate) equilibration weight vectors
+  /// Caches the always-valid (identity if !equilibrated_) equilibration weight vectors
   /// and the unscaled ||b||_inf / ||q||_inf norms. Called from setup() and whenever updateData()
   /// changes b or q.
   void cacheEquilibrationWeights();
   void cacheUnscaledDataNorms(bool b_changed, bool q_changed);
 
   /// max_i |weights_i * v_i| (a no-op abs-max if weights is empty, i.e. equilibrate == false).
-  static Scalar weightedInfNorm(const Vec& v, const Vec& weights);
+  static Scalar weightedInfNorm(const Eigen::Ref<const Vec>& v, const Vec& weights);
 
   struct Metrics {
     Scalar res_primal = 0, res_dual = 0;      // unscaled, tau-normalized, T4.1
@@ -123,9 +131,17 @@ class SolverImpl {
 
   void finalizeSolution(Status status, const Metrics& m, Scalar mu);
 
+  /// Stores the (equilibrated) zero-cone compliance and passes it to the KKT system.
+  void setCompliance(const Vec* zero_compliance);
+
   // --- problem data (equilibrated in place if enabled) ---
   SparseMat P_, A_;
   Vec q_, b_;
+  // Zero-cone compliance C (equilibrated, size zero_dim); the iterate carries the eliminated
+  // primal variables pi = -z_E, so z_E'C z_E is part of every x'Px below (docs/design.md,
+  // "Compliant rows").
+  Vec compliance_;
+  bool has_compliance_ = false;
   Index n_ = 0, m_ = 0;
   ConeSpec cone_spec_;
   std::unique_ptr<ConeSet> cones_;
@@ -133,6 +149,10 @@ class SolverImpl {
   Equilibration equil_;
   KktSystem kkt_;
   bool setup_done_ = false;
+  bool equilibrated_ = false;     // settings_.equilibrate at setup(); changing it needs setup()
+  bool have_cold_merit_ = false;  // merit of the last cold start, decides about warm starts
+  Scalar cold_merit_ = 0;
+  Scalar setup_time_s_ = 0;
 
   // --- iterate ---
   Vec x_, s_, z_;
@@ -140,6 +160,7 @@ class SolverImpl {
 
   // --- residual cache ---
   Vec Px_, rx_, rz_;
+  Vec Cz_;  // C z_E (size zero_dim), valid if has_compliance_
   Scalar rtau_ = 0, dot_qx_ = 0, dot_bz_ = 0, dot_sz_ = 0, dot_xPx_ = 0;
 
   // --- per-iteration constant KKT solve cache ---
@@ -160,10 +181,11 @@ class SolverImpl {
   // solve() call, not every one (T7.1).
   Vec warm_x_trial_, warm_s_trial_, warm_z_trial_;
 
+
   // --- step-length safeguard state (T3.2) ---
   int consecutive_tiny_steps_ = 0;  ///< reset in solve(); see Status::InsufficientProgress
 
-  // --- equilibration weights, always valid regardless of settings_.equilibrate (T4.1) ---
+  // --- equilibration weights, always valid regardless of equilibrated_ (T4.1) ---
   Vec d_eff_, e_eff_, dinv_eff_, einv_eff_;  // size n, m, n, m respectively
   Scalar cinv_ = 1.0;
   Scalar normb_ = 0, normq_ = 0;  // unscaled ||b||_inf, ||q||_inf; cached, recomputed on data change
@@ -188,6 +210,8 @@ class SolverImpl {
   // KKT solve RHS/solution, shared by computeInitialPoint()/computeConstantSolve()/
   // computeAffineStep()/computeCombinedStep() (size n_+m_).
   Vec kkt_rhs_, kkt_sol_;
+  // Affine right-hand side and solution, solved together with the constant one (size n_+m_).
+  Vec kkt_rhs_aff_, kkt_sol_aff_;
 
   // Pmul() result and the xi/xi-x1 intermediates computeAffineStep()/computeCombinedStep() both
   // need (size n_).

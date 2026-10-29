@@ -37,7 +37,8 @@ struct Result {
   int trial = 0;
   Status status = Status::Unsolved;
   int iterations = 0;
-  double solve_ms = 0.0;
+  int factorizations = 0;
+  double setup_ms = 0.0, solve_ms = 0.0;
   double primal_res = 0.0, dual_res = 0.0, gap = 0.0;
 
   double msPerIter() const { return solve_ms / static_cast<double>(std::max(iterations, 1)); }
@@ -59,12 +60,15 @@ Result runOne(const BenchProblem& p, int trial) {
     r.status = Status::NumericalError;
     return r;
   }
-  const Solution& sol = solver.solve();
   const auto t1 = std::chrono::steady_clock::now();
+  const Solution& sol = solver.solve();
+  const auto t2 = std::chrono::steady_clock::now();
 
   r.status = sol.status;
   r.iterations = sol.info.iterations;
-  r.solve_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  r.factorizations = sol.info.kkt_factorizations;
+  r.setup_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+  r.solve_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
   r.primal_res = sol.info.primal_residual;
   r.dual_res = sol.info.dual_residual;
   r.gap = sol.info.duality_gap;
@@ -72,15 +76,16 @@ Result runOne(const BenchProblem& p, int trial) {
 }
 
 void printHeader() {
-  std::printf("%-16s %-24s %5s %-15s %6s %10s %12s %10s %10s %10s\n", "Family", "Size", "Trial",
-              "Status", "Iters", "Time(ms)", "Time/Iter(ms)", "PrimalRes", "DualRes", "Gap");
-  std::printf("%s\n", std::string(130, '-').c_str());
+  std::printf("%-16s %-24s %5s %-15s %6s %5s %10s %10s %12s %10s %10s %10s\n", "Family", "Size",
+              "Trial", "Status", "Iters", "Fact", "Setup(ms)", "Solve(ms)", "Time/Iter(ms)", "PrimalRes",
+              "DualRes", "Gap");
+  std::printf("%s\n", std::string(147, '-').c_str());
 }
 
 void printRow(const Result& r) {
-  std::printf("%-16s %-24s %5d %-15s %6d %10.3f %12.4f %10.2e %10.2e %10.2e\n", r.family.c_str(),
-              r.size_label.c_str(), r.trial, toString(r.status), r.iterations, r.solve_ms,
-              r.msPerIter(), r.primal_res, r.dual_res, r.gap);
+  std::printf("%-16s %-24s %5d %-15s %6d %5d %10.3f %10.3f %12.4f %10.2e %10.2e %10.2e\n",
+              r.family.c_str(), r.size_label.c_str(), r.trial, toString(r.status), r.iterations,
+              r.factorizations, r.setup_ms, r.solve_ms, r.msPerIter(), r.primal_res, r.dual_res, r.gap);
 }
 
 void printSummary(const std::vector<Result>& group) {
@@ -100,7 +105,7 @@ void printSummary(const std::vector<Result>& group) {
   const double mean_it =
       std::accumulate(iters.begin(), iters.end(), 0.0) / static_cast<double>(iters.size());
 
-  std::printf("  -> %s: iters[min=%d,mean=%.1f,max=%d] mean_time=%.3fms worst[primal=%.2e "
+  std::printf("  -> %s: iters[min=%d,mean=%.1f,max=%d] mean_solve=%.3fms worst[primal=%.2e "
               "dual=%.2e gap=%.2e]\n",
               all_solved ? "OK" : "**FAILED TO CONVERGE**", *min_it, mean_it, *max_it,
               sum_ms / static_cast<double>(group.size()), worst_primal, worst_dual, worst_gap);
@@ -125,6 +130,67 @@ void runFamily(const std::string& family, const std::vector<Index>& sizes, int t
     }
     printSummary(group);
   }
+}
+
+/// Steady-state time-stepping path: one setup(), then per step a perturbation of q and b by up to
+/// +-`perturbation` (relative, per entry), updateData() and solve(). Run once with the warm start
+/// and once without it on identical data.
+struct SequenceResult {
+  int steps = 0, solved = 0, iterations = 0, factorizations = 0;
+  double ms = 0.0;
+};
+
+SequenceResult runSequence(const BenchProblem& p, bool warm, int steps, Scalar perturbation) {
+  SequenceResult r;
+  Settings settings;
+  settings.warm_start = warm;
+  Solver solver;
+  if (!solver.setup(p.P, p.q, p.A, p.b, p.cone_spec, settings)) return r;
+  std::mt19937 rng(12345);
+  std::uniform_real_distribution<Scalar> pert(-perturbation, perturbation);
+  Vec q = p.q, b = p.b;
+  for (int step = 0; step < steps; ++step) {
+    if (step > 0) {
+      for (Index i = 0; i < q.size(); ++i) q[i] *= 1.0 + pert(rng);
+      for (Index i = 0; i < b.size(); ++i) b[i] *= 1.0 + pert(rng);
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    if (step > 0 && !solver.updateData(nullptr, &q, nullptr, &b)) return r;
+    const Solution& sol = solver.solve();
+    r.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    ++r.steps;
+    r.solved += sol.status == Status::Solved ? 1 : 0;
+    r.iterations += sol.info.iterations;
+    r.factorizations += sol.info.kkt_factorizations;
+  }
+  return r;
+}
+
+void runSequences(bool& all_ok) {
+  constexpr int kSteps = 30;
+  constexpr Scalar kPerturbation = 0.005;
+  std::printf("\nWarm-start sequences: %d steps, q and b perturbed by up to %.1f %% per step\n", kSteps,
+              100.0 * kPerturbation);
+  std::printf("%-16s %-24s %-5s %7s %6s %6s %10s\n", "Family", "Size", "Start", "Solved", "Iters", "Fact",
+              "Time(ms)");
+  const auto run = [&](const BenchProblem& p) {
+    for (const bool warm : {false, true}) {
+      const SequenceResult r = runSequence(p, warm, kSteps, kPerturbation);
+      std::printf("%-16s %-24s %-5s %3d/%-3d %6d %6d %10.3f\n", p.family.c_str(), p.size_label.c_str(),
+                  warm ? "warm" : "cold", r.solved, kSteps, r.iterations, r.factorizations, r.ms);
+      all_ok = all_ok && r.solved == kSteps;
+    }
+    std::fflush(stdout);
+  };
+  std::mt19937 rng = makeRng("FrictionChain", 64, 0);
+  run(makeFrictionChain(64, 0.7, rng));
+  rng = makeRng("FrictionChainXL", 66, 0);
+  run(makeFrictionChainXL(66, 0.7, rng));
+  rng = makeRng("ApexContacts", 64, 0);
+  run(makeApexContacts(64, 0.7, rng));
+  // A pure SOCP (P = 0) with perturbed q can become unbounded; the group lasso stays bounded.
+  rng = makeRng("GroupLasso", 30, 0);
+  run(makeGroupLasso(30, 5, 240, rng));
 }
 
 }  // namespace
@@ -190,6 +256,8 @@ int main() {
       "ApexContacts", {4, 16, 64}, kTrials,
       [](Index num_contacts, std::mt19937& rng) { return makeApexContacts(num_contacts, 0.7, rng); },
       all_ok);
+
+  runSequences(all_ok);
 
   std::printf("\n%s\n", all_ok ? "ALL BENCHMARKS CONVERGED (Status::Solved)."
                                 : "REGRESSION: at least one benchmark instance did not "

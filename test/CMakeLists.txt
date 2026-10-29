@@ -18,37 +18,36 @@ endif()
 
 include(GoogleTest)
 
+# Tests reach into internal headers (KktSystem, QuasiDefiniteLdlt, cones); those live in
+# src/conicxx next to the public ones, so the conicxx target's include path already covers them.
 add_executable(conicxx_tests
-  cones/test_zero_cone.cpp
-  cones/test_nonnegative_cone.cpp
-  cones/test_second_order_cone.cpp
-  cones/test_cone_set.cpp
-  convert/test_convert.cpp
-  kkt/test_sparsity_map.cpp
-  kkt/test_kkt_system.cpp
-  kkt/test_kkt_system_backends.cpp
-  kkt/test_regularized_ldlt.cpp
-  kkt/test_equilibration.cpp
-  solver/test_solve_qp.cpp
-  solver/test_solve_lp.cpp
-  solver/test_solve_socp.cpp
-  solver/test_solve_friction_qp_soc.cpp
-  solver/test_solve_apex_contacts.cpp
-  solver/test_termination_unscaled.cpp
-  solver/test_warm_start.cpp
-  solver/test_solve_dense_input.cpp
-  solver/test_solve_equality_robustness.cpp
-  solver/test_infeasible.cpp
-  solver/test_update_reuse.cpp
-  solver/test_alloc_free_hot_path.cpp
-  version/test_version.cpp
+  test_alloc_free_hot_path.cpp
+  test_compliant_rows.cpp
+  test_cone_set.cpp
+  test_convert.cpp
+  test_equilibration.cpp
+  test_infeasible.cpp
+  test_ipm_safeguards.cpp
+  test_kkt_system.cpp
+  test_nonnegative_cone.cpp
+  test_quasidefinite_ldlt.cpp
+  test_second_order_cone.cpp
+  test_solve_apex_contacts.cpp
+  test_solve_dense_input.cpp
+  test_solve_equality_robustness.cpp
+  test_solve_friction_qp_soc.cpp
+  test_solve_lp.cpp
+  test_solve_qp.cpp
+  test_solve_socp.cpp
+  test_sparsity_map.cpp
+  test_termination_unscaled.cpp
+  test_update_reuse.cpp
+  test_version.cpp
+  test_warm_start.cpp
+  test_zero_cone.cpp
 )
-
 target_link_libraries(conicxx_tests PRIVATE conicxx::conicxx GTest::gtest_main)
-target_include_directories(conicxx_tests PRIVATE
-  ${CMAKE_SOURCE_DIR}/src
-  ${CMAKE_CURRENT_SOURCE_DIR}/utils
-)
+target_include_directories(conicxx_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 conicxx_set_warnings(conicxx_tests)
 
 gtest_discover_tests(conicxx_tests)
