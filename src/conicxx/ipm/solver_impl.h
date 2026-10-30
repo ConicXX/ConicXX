@@ -6,6 +6,7 @@
 
 #include "conicxx/cone_spec.h"
 #include "conicxx/cones/cone_set.h"
+#include "conicxx/ipm/coulomb_ipm.h"
 #include "conicxx/ipm/equilibration.h"
 #include "conicxx/kkt/kkt_system.h"
 #include "conicxx/settings.h"
@@ -134,6 +135,11 @@ class SolverImpl {
   /// Stores the (equilibrated) zero-cone compliance and passes it to the KKT system.
   void setCompliance(const Vec* zero_compliance);
 
+  /// solve() for problems with Coulomb cones: start point as for the convex loop (warm start
+  /// against cold start by merit), then CoulombIpm.
+  const Solution& solveCoulomb();
+  CoulombProblem coulombProblem();
+
   // --- problem data (equilibrated in place if enabled) ---
   SparseMat P_, A_;
   Vec q_, b_;
@@ -148,6 +154,7 @@ class SolverImpl {
   Settings settings_;
   Equilibration equil_;
   KktSystem kkt_;
+  std::unique_ptr<CoulombIpm> coulomb_;  // only with Coulomb cones
   bool setup_done_ = false;
   bool equilibrated_ = false;     // settings_.equilibrate at setup(); changing it needs setup()
   bool have_cold_merit_ = false;  // merit of the last cold start, decides about warm starts

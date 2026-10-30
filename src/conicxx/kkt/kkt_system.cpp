@@ -154,7 +154,7 @@ bool KktSystem::updateData(const SparseMat* P_upper, const SparseMat* A) {
   return true;
 }
 
-bool KktSystem::updateScalingAndFactorize(const ConeSet& cones) {
+void KktSystem::writeScaling(const ConeSet& cones) {
   for (Index bi = 0; bi < cones.numBlocks(); ++bi) {
     const std::vector<Index>& slots = hs_slots_[bi];
     const Index ne = static_cast<Index>(slots.size());
@@ -167,8 +167,35 @@ bool KktSystem::updateScalingAndFactorize(const ConeSet& cones) {
   for (Index slot : diag_slots_) max_diag = std::max(max_diag, std::abs(sparsity_.getValue(K_, slot)));
   reg_.array() = reg_base_.array() + reg_proportional_ * max_diag;
   ldlt_.setStaticRegularization(reg_);
+}
 
+bool KktSystem::updateScalingAndFactorize(const ConeSet& cones) {
+  writeScaling(cones);
   factorized_ = ldlt_.factorize(K_);
+  ++stats_.factorizations;
+  stats_.dynamic_reg_pivots += ldlt_.numDynamicRegularized();
+  return factorized_;
+}
+
+bool KktSystem::updateScalingAndFactorize(const ConeSet& cones, const std::vector<Index>& coulomb_blocks,
+                                          const Vec& row0) {
+  writeScaling(cones);
+  // Lower triangle of an SOC block in row-major order: (0,0) is slot 0, (a,0) slot a(a+1)/2. The
+  // lower entries (a,0) keep -Hs(a,0); the diagonal and the transposed entries (0,a) get -r_a.
+  Scalar* Kx = K_.valuePtr();
+  for (Index bi : coulomb_blocks) {
+    const Index p00 = sparsity_.offset(hs_slots_[bi][0]);
+    Kx[p00] -= row0[cones.blockOffset(bi)];
+  }
+  upper_values_.assign(Kx, Kx + K_.nonZeros());
+  for (Index bi : coulomb_blocks) {
+    const std::vector<Index>& slots = hs_slots_[bi];
+    const Index off = cones.blockOffset(bi), d = cones.blockDim(bi);
+    for (Index a = 1; a < d; ++a) {
+      upper_values_[static_cast<size_t>(sparsity_.offset(slots[static_cast<size_t>(a * (a + 1) / 2)]))] -= row0[off + a];
+    }
+  }
+  factorized_ = ldlt_.factorizeUnsymmetric(K_, upper_values_.data());
   ++stats_.factorizations;
   stats_.dynamic_reg_pivots += ldlt_.numDynamicRegularized();
   return factorized_;

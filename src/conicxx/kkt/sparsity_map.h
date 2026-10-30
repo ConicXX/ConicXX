@@ -39,6 +39,9 @@ class SparsityMap {
     K.valuePtr()[offsets_[static_cast<size_t>(slot)]] = value;
   }
 
+  /// Position of the slot in the CSC value array.
+  Index offset(Index slot) const { return offsets_[static_cast<size_t>(slot)]; }
+
   Scalar getValue(const SparseMat& K, Index slot) const {
     return K.valuePtr()[offsets_[static_cast<size_t>(slot)]];
   }

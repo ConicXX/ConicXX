@@ -70,9 +70,11 @@ set(CONICXX_SOURCES
   src/conicxx/solver.cpp
   src/conicxx/version.cpp
   src/conicxx/cones/cone_set.cpp
+  src/conicxx/cones/coulomb_map.cpp
   src/conicxx/cones/nonnegative_cone.cpp
   src/conicxx/cones/second_order_cone.cpp
   src/conicxx/cones/zero_cone.cpp
+  src/conicxx/ipm/coulomb_ipm.cpp
   src/conicxx/ipm/equilibration.cpp
   src/conicxx/ipm/solver_impl.cpp
   src/conicxx/kkt/kkt_system.cpp

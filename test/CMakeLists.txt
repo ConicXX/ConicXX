@@ -33,6 +33,7 @@ add_executable(conicxx_tests
   kkt/test_sparsity_map.cpp
   solver/test_alloc_free_hot_path.cpp
   solver/test_compliant_rows.cpp
+  solver/test_coulomb.cpp
   solver/test_equilibration.cpp
   solver/test_infeasible.cpp
   solver/test_ipm_safeguards.cpp

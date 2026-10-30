@@ -25,6 +25,18 @@ struct RegularizationSettings {
   Scalar dynamic_delta = 2e-7;
 };
 
+/// Exact Coulomb friction (ConeSpec::soc_coulomb), docs/design.md "Exact Coulomb friction".
+struct CoulombSettings {
+  /// Smoothing of the De Saxce term: l = sqrt(||s_bar||^2 + (c mu)^2) with mu the complementarity
+  /// measure of the iteration and c = smoothing / z_ref, z_ref the median normal component of z at
+  /// the starting point. The smoothing error c mu vanishes with mu; 0 = unsmoothed.
+  Scalar smoothing = 0.1;
+  /// Lower bound of the centering target sigma mu, as a fraction of the complementarity tolerance
+  /// (max(tol_gap_abs, tol_gap_rel * scale), scaled units). Near the boundary the NT neighborhood
+  /// allows ||s o z|| ~ sqrt(mu); steps towards the central point at this mu bring it down to mu.
+  Scalar mu_floor = 0.1;
+};
+
 /// Solver configuration (plain aggregate).
 struct Settings {
   // --- Termination, evaluated on unscaled quantities (docs/design.md "Termination") ---
@@ -50,6 +62,8 @@ struct Settings {
   Scalar reduced_tol_ktratio = 1e-4;
 
   RegularizationSettings regularization;
+
+  CoulombSettings coulomb;
 
   /// Supernodal LDL^T of the KKT matrix: dense matrix-product kernels for columns with nested
   /// patterns; the same factor as the simplicial one up to roundoff. Read at setup().

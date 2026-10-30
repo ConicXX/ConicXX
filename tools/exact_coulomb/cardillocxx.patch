@@ -1,0 +1,344 @@
+diff --git a/docs/chapters/solvers/interior_point.rst b/docs/chapters/solvers/interior_point.rst
+index bc0879d..c3d9902 100644
+--- a/docs/chapters/solvers/interior_point.rst
++++ b/docs/chapters/solvers/interior_point.rst
+@@ -476,6 +476,10 @@ Config keys
+    * - ``conicxx.compliant_rows``
+      - Springs and dampers as compliant zero-cone rows (``on``, default) or
+        with their percussions as primal variables (``off``) (ConicXX only)
++   * - ``conicxx.exact_coulomb``
++     - Exact Coulomb friction: the De Saxcé shift is part of the problem
++       (Coulomb cones of ConicXX) instead of being evaluated at
++       :math:`v^n` (ConicXX only, experimental, default ``off``)
+    * - ``conicxx.verbose``
+      - ``0`` silent, ``1`` summary, ``2`` iteration table per solve (ConicXX
+        only)
+diff --git a/docs/chapters/using_the_engine/setup.rst b/docs/chapters/using_the_engine/setup.rst
+index 49785c8..2e652b1 100644
+--- a/docs/chapters/using_the_engine/setup.rst
++++ b/docs/chapters/using_the_engine/setup.rst
+@@ -322,6 +322,10 @@ prefixes as shown:
+      - ``conicxx.compliant_rows``
+      - ``true``
+      - ConicXX: springs and dampers as compliant zero-cone rows; ``false`` keeps their percussions as primal variables.
++   * - ``conicxx_exact_coulomb``
++     - ``conicxx.exact_coulomb``
++     - ``false``
++     - ConicXX (experimental): exact Coulomb friction, the De Saxcé term evaluated implicitly at the new velocity instead of at :math:`v^n`.
+    * - ``conicxx_verbose``
+      - ``conicxx.verbose``
+      - ``0``
+diff --git a/src/config/config.cpp b/src/config/config.cpp
+index 7a6a515..f603049 100644
+--- a/src/config/config.cpp
++++ b/src/config/config.cpp
+@@ -227,6 +227,10 @@ Config ConfigReader::fromFile(const std::string& path) {
+             std::string v = val;
+             std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+             cfg.conicxx_compliant_rows = (v == "1" || v == "true" || v == "yes" || v == "on");
++        } else if (key == "conicxx.exact_coulomb") {
++            std::string v = val;
++            std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return (char)std::tolower(c); });
++            cfg.conicxx_exact_coulomb = (v == "1" || v == "true" || v == "yes" || v == "on");
+         } else if (key == "conicxx.verbose") {
+             try {
+                 cfg.conicxx_verbose = std::max(0, std::stoi(val));
+diff --git a/src/config/config.hpp b/src/config/config.hpp
+index a36801e..80e752f 100644
+--- a/src/config/config.hpp
++++ b/src/config/config.hpp
+@@ -208,6 +208,7 @@ struct Config {
+     real_t conicxx_warm_lambda{(real_t)0.99};    // conicxx.warm_lambda -- weight of the previous solution in the warm start
+     bool conicxx_warm_start_after_setup{true};   // conicxx.warm_start_after_setup -- warm start from velocities and matched impulses when the contact set changed
+     bool conicxx_compliant_rows{true};           // conicxx.compliant_rows -- springs/dampers as compliant zero-cone rows (off: percussions as primal variables)
++    bool conicxx_exact_coulomb{false};           // conicxx.exact_coulomb -- exact (implicit De Saxce) Coulomb friction instead of the shift from v^n (experimental)
+     int conicxx_verbose{0};                      // conicxx.verbose -- 0 silent, 1 summary, 2 iteration table per solve
+ 
+     // ConicXX-only: remaining conicxx::Settings fields not already covered by
+diff --git a/src/physics/assembly/conicxx_assembler.cpp b/src/physics/assembly/conicxx_assembler.cpp
+index b570d51..22b3ff2 100644
+--- a/src/physics/assembly/conicxx_assembler.cpp
++++ b/src/physics/assembly/conicxx_assembler.cpp
+@@ -58,7 +58,7 @@ VectorXr& ConicxxAssembler::b(real_t dt, real_t theta) {
+ 
+     VectorXr b_top = -m_dyn->springBias(dt, theta);
+     VectorXr b_mid = -m_dyn->damperBias(dt, theta);
+-    VectorXr b_contact = scaledContactOffset(*m_dyn, Smu, biasImpulse, gamma_old);
++    VectorXr b_contact = m_exact_coulomb ? VectorXr(Smu.cwiseProduct(biasImpulse)) : scaledContactOffset(*m_dyn, Smu, biasImpulse, gamma_old);
+ 
+     m_b_cache.resize(b_top.size() + b_mid.size() + b_contact.size());
+     m_b_cache << b_top, b_mid, b_contact;
+@@ -82,6 +82,7 @@ const conicxx::ConeSpec& ConicxxAssembler::coneSpec() {
+ 
+     const int nsoc = m_dyn->numFrictionalContacts();
+     m_cone_spec_cache.soc_dims.assign(static_cast<std::size_t>(nsoc), 3);
++    if (m_exact_coulomb) m_cone_spec_cache.soc_coulomb.assign(static_cast<std::size_t>(nsoc), 1);
+ 
+     return m_cone_spec_cache;
+ }
+diff --git a/src/physics/assembly/conicxx_assembler.hpp b/src/physics/assembly/conicxx_assembler.hpp
+index bcdafa1..082dc20 100644
+--- a/src/physics/assembly/conicxx_assembler.hpp
++++ b/src/physics/assembly/conicxx_assembler.hpp
+@@ -24,11 +24,17 @@ namespace cardillo::physics::assembly {
+ // rows with compliances C = (Ĉ_g, Ĉ_gamma); the bilateral percussions are pi = -z_E.
+ // Augmented (compliant_rows = false): x = (u, pi_g, pi_gamma), P = blkdiag(M, Ĉ_g, Ĉ_gamma),
+ // rows [W_g' Ĉ_g 0; W_gamma' 0 Ĉ_gamma] with C = 0. Both have the same solution u, z.
++//
++// Friction: by default the De Saxce shift mu ||xi_T(v^n)|| is part of b (conic_scaling.hpp). With
++// exact_coulomb the frictional cones are ConicXX Coulomb cones and the shift mu ||xi_T(u)|| at the
++// new velocity is part of the problem; b holds S * biasImpulse only.
+ class ConicxxAssembler {
+    public:
+-    ConicxxAssembler(physics::DynamicsAssembler& dyn, bool compliant_rows) : m_dyn(&dyn), m_compliant_rows(compliant_rows) {}
++    ConicxxAssembler(physics::DynamicsAssembler& dyn, bool compliant_rows, bool exact_coulomb)
++        : m_dyn(&dyn), m_compliant_rows(compliant_rows), m_exact_coulomb(exact_coulomb) {}
+ 
+     bool compliantRows() const { return m_compliant_rows; }
++    bool exactCoulomb() const { return m_exact_coulomb; }
+ 
+     const SparseMatrix<Eigen::ColMajor>& P(real_t dt, real_t theta);
+     VectorXr& q(real_t dt, real_t theta);
+@@ -49,6 +55,7 @@ class ConicxxAssembler {
+ 
+     physics::DynamicsAssembler* m_dyn{nullptr};
+     bool m_compliant_rows{true};
++    bool m_exact_coulomb{false};
+ 
+     SparseMatrix<Eigen::ColMajor> m_P_cache;
+     SparseMatrix<Eigen::ColMajor> m_A_cache;
+diff --git a/src/physics/solver/conicxx_solver.cpp b/src/physics/solver/conicxx_solver.cpp
+index 5300e8b..3b51723 100644
+--- a/src/physics/solver/conicxx_solver.cpp
++++ b/src/physics/solver/conicxx_solver.cpp
+@@ -1,6 +1,8 @@
+ #include "conicxx_solver.hpp"
+ 
+ #include <algorithm>
++#include <cstdlib>
++#include <fstream>
+ #include <iostream>
+ #include <stdexcept>
+ 
+@@ -9,14 +11,14 @@ namespace cardillo::solver {
+ namespace {
+ 
+ bool sameConeSpec(const conicxx::ConeSpec& a, const conicxx::ConeSpec& b) {
+-    return a.zero_dim == b.zero_dim && a.nonneg_dim == b.nonneg_dim && a.soc_dims == b.soc_dims;
++    return a.zero_dim == b.zero_dim && a.nonneg_dim == b.nonneg_dim && a.soc_dims == b.soc_dims && a.soc_coulomb == b.soc_coulomb;
+ }
+ 
+ const char* statusToString(conicxx::Status status) { return conicxx::toString(status); }
+ 
+ }  // namespace
+ 
+-ConicxxSolver::ConicxxSolver(physics::DynamicsAssembler& dyn, const config::Config& cfg) : m_dyn(dyn), m_cfg(cfg), m_assembler(m_dyn, cfg.conicxx_compliant_rows) {}
++ConicxxSolver::ConicxxSolver(physics::DynamicsAssembler& dyn, const config::Config& cfg) : m_dyn(dyn), m_cfg(cfg), m_assembler(m_dyn, cfg.conicxx_compliant_rows, cfg.conicxx_exact_coulomb) {}
+ 
+ ConicxxSolver::~ConicxxSolver() = default;
+ 
+@@ -69,6 +71,10 @@ void ConicxxSolver::setWarmStartFromState(const SparseMatrix<Eigen::ColMajor>& A
+ 
+     VectorXr s = b - A * x;
+     s.head(nE) += compliance.cwiseProduct(z.head(nE));
++    if (m_assembler.exactCoulomb()) {
++        // Coulomb cones: the slack is the De Saxce modified velocity (xi_N + mu ||xi_T||, mu xi_T).
++        for (int i = nE + m_dyn.numFrictionlessContacts(); i < s.size(); i += 3) s[i] += s.segment<2>(i + 1).norm();
++    }
+     m_solver.setWarmStart(x, s, z);
+ }
+ 
+@@ -117,6 +123,26 @@ VectorXr ConicxxSolver::solve(real_t dt, real_t theta) {
+         }
+     }
+ 
++    if (const char* dump = std::getenv("CARDILLO_CONICXX_DUMP")) {  // problem dump for tools/exact_coulomb (ConicXX)
++        static int step = 0;
++        std::ofstream f(std::string(dump) + "/step" + std::to_string(step++) + ".txt");
++        f.precision(17);
++        auto mat = [&](const SparseMatrix<Eigen::ColMajor>& M) {
++            f << M.rows() << " " << M.cols() << " " << M.nonZeros() << "\n";
++            for (int c = 0; c < M.outerSize(); ++c)
++                for (SparseMatrix<Eigen::ColMajor>::InnerIterator it(M, c); it; ++it) f << it.row() << " " << it.col() << " " << it.value() << "\n";
++        };
++        auto vec = [&](const VectorXr& v) {
++            f << v.size() << "\n";
++            for (int i = 0; i < v.size(); ++i) f << v[i] << "\n";
++        };
++        mat(*P);
++        vec(*q);
++        mat(*A);
++        vec(*b);
++        vec(*compliance);
++        f << cone_spec.zero_dim << " " << cone_spec.nonneg_dim << " " << cone_spec.soc_dims.size() << " " << (cone_spec.soc_coulomb.empty() ? 0 : 1) << "\n";
++    }
+     const conicxx::Solution* solution = nullptr;
+     {
+         auto sc = m_dyn.timings()->scope(misc::TimingManager::TimerId::ConicxxSolve);
+@@ -125,7 +151,7 @@ VectorXr ConicxxSolver::solve(real_t dt, real_t theta) {
+     m_last_iters = solution->info.iterations;
+     if (m_cfg.debug_pj) {
+         const conicxx::Info& info = solution->info;
+-        std::cout << "ConicXX: " << (need_setup ? "setup" : "update") << ", zero=" << cone_spec.zero_dim << " nonneg=" << cone_spec.nonneg_dim
++        std::cout << "ConicXX" << (m_assembler.exactCoulomb() ? " (exact Coulomb)" : "") << ": " << (need_setup ? "setup" : "update") << ", zero=" << cone_spec.zero_dim << " nonneg=" << cone_spec.nonneg_dim
+                   << " soc=" << cone_spec.soc_dims.size() << ", " << info.iterations << " iterations, " << info.kkt_factorizations << " factorizations, "
+                   << info.kkt_dynamic_reg_pivots << " dynamic pivots, " << info.kkt_refinement_steps << " refinement steps, setup " << 1e3 * info.setup_time_s << " ms, solve " << 1e3 * info.solve_time_s << " ms, "
+                   << (info.warm_start_used ? "warm" : "cold") << " start (merit warm " << info.warm_start_merit << ", cold " << info.cold_start_merit << ")\n";
+diff --git a/tests/test_convexified_friction.cpp b/tests/test_convexified_friction.cpp
+index 7030c1f..1d36477 100644
+--- a/tests/test_convexified_friction.cpp
++++ b/tests/test_convexified_friction.cpp
+@@ -13,6 +13,7 @@
+ //     for a sticking impact instead of e V. This error is O(1) in h.
+ // The contact point of Coal lies in the middle of the penetration, so the lever arm rho of the
+ // contact is slightly smaller than R; the closed forms use the lever arm of the engine's contact.
++// ConicXX with conicxx.exact_coulomb solves the exact law and is checked like projected Jacobi.
+ 
+ #include <cmath>
+ #include <iostream>
+@@ -64,10 +65,22 @@ struct Run {
+     real_t finalHeight{0};
+ };
+ 
++// A solver and, for ConicXX, its friction law.
++struct Variant {
++    config::SolverType solver{config::SolverType::ProjectedJacobi};
++    bool exactCoulomb{false};  // conicxx.exact_coulomb
++    // The exact Coulomb law: projected Jacobi or ConicXX in exact mode.
++    bool exactLaw() const { return solver == config::SolverType::ProjectedJacobi || exactCoulomb; }
++    // Accuracy of the exact law: round-off for projected Jacobi, the solver tolerance 1e-10 (relative
++    // to the problem data) for the interior-point method.
++    real_t exactTol() const { return solver == config::SolverType::ProjectedJacobi ? 1e-9 : 1e-7; }
++};
++
+ // Sphere above the plane z = 0 with center height z0, velocity v0 along x and spin omega0 about y.
+-Run simulate(config::SolverType solver, real_t dt, real_t T, real_t z0, real_t v0, real_t omega0, real_t e) {
++Run simulate(const Variant& variant, real_t dt, real_t T, real_t z0, real_t v0, real_t omega0, real_t e) {
+     config::Config cfg;
+-    cfg.solver = solver;
++    cfg.solver = variant.solver;
++    cfg.conicxx_exact_coulomb = variant.exactCoulomb;
+     cfg.moreau_theta = 1.0;
+     cfg.sim_dt = dt;
+     cfg.sim_T = T;
+@@ -77,7 +90,7 @@ Run simulate(config::SolverType solver, real_t dt, real_t T, real_t z0, real_t v
+     cfg.restitution_default_normal = e;
+     cfg.restitution_default_tangential = 0.0;
+     // Projected Jacobi to round-off; the interior-point methods stall for much tighter tolerances.
+-    const bool conic = solver != config::SolverType::ProjectedJacobi;
++    const bool conic = variant.solver != config::SolverType::ProjectedJacobi;
+     cfg.pj_tol_abs = conic ? 1e-10 : 1e-12;
+     cfg.pj_tol_rel = conic ? 1e-10 : 1e-12;
+     cfg.pj_max_iterations = 100000;
+@@ -107,8 +120,8 @@ Run simulate(config::SolverType solver, real_t dt, real_t T, real_t z0, real_t v
+     return run;
+ }
+ 
+-const char* name(config::SolverType s) {
+-    switch (s) {
++std::string name(const Variant& v) {
++    switch (v.solver) {
+         case config::SolverType::ProjectedJacobi:
+             return "pj";
+         case config::SolverType::Qoco:
+@@ -116,7 +129,7 @@ const char* name(config::SolverType s) {
+         case config::SolverType::Clarabel:
+             return "clarabel";
+         default:
+-            return "conicxx";
++            return v.exactCoulomb ? "conicxx exact" : "conicxx";
+     }
+ }
+ 
+@@ -137,11 +150,11 @@ Residuals lawResiduals(const Run& run, real_t e) {
+ 
+ // 1. Ball placed on the plane (1e-8 deep, so that the contact is detected in the first step), sliding
+ // with v0 = 2 m/s without spin. The sliding phase ends at t = 2 v0 / (7 mu g) = 0.19 s.
+-void slidingBall(config::SolverType solver, real_t dt) {
++void slidingBall(const Variant& variant, real_t dt) {
+     const real_t v0 = 2.0;
+-    const Run run = simulate(solver, dt, 0.4, kRadius - 1e-8, v0, 0.0, 0.0);
++    const Run run = simulate(variant, dt, 0.4, kRadius - 1e-8, v0, 0.0, 0.0);
+     const Residuals res = lawResiduals(run, 0.0);
+-    const std::string tag = std::string(name(solver)) + " sliding, h=" + std::to_string(dt);
++    const std::string tag = name(variant) + " sliding, h=" + std::to_string(dt);
+ 
+     // Normal velocity after step k (1-based) in the middle of the sliding phase.
+     const int k = static_cast<int>(std::lround(0.1 / dt));
+@@ -153,13 +166,13 @@ void slidingBall(config::SolverType solver, real_t dt) {
+     std::cout << tag << ": max|xi_N| " << res.exact << ", max|xi_N - mu dslip| " << res.convexified << ", v_z(0.1 s) " << s.vNew.z() << " (convexified " << vzConvex << "), penetration " << depth
+               << " (mu h v0 = " << kMu * dt * v0 << "), v_x(end) " << vxEnd << " (5/7 v0 = " << 5.0 / 7.0 * v0 << ")" << std::endl;
+ 
+-    if (solver != config::SolverType::ProjectedJacobi) {
++    if (!variant.exactLaw()) {
+         check(res.convexified < 1e-7, tag + ": convexified law (*) holds in every step");
+         check(std::abs(s.vNew.z() - vzConvex) < 1e-3 * std::abs(vzConvex), tag + ": sinking velocity -kappa mu^2 g h (1 - a^k)");
+         check(std::abs(depth - kMu * dt * v0) < 1e-2 * kMu * dt * v0, tag + ": final penetration mu h v0");
+         check(std::abs(vxEnd - 5.0 / 7.0 * v0) < depth / kRadius * v0, tag + ": rolling velocity 5/7 v0 up to the lever arm R - depth/2");
+     } else {
+-        check(res.exact < 1e-9, tag + ": exact Signorini law, v_z = 0");
++        check(res.exact < variant.exactTol(), tag + ": exact Signorini law, v_z = 0");
+         check(depth < 1e-7, tag + ": no penetration");
+         check(std::abs(vxEnd - 5.0 / 7.0 * v0) < 1e-7, tag + ": rolling velocity 5/7 v0");
+     }
+@@ -168,9 +181,9 @@ void slidingBall(config::SolverType solver, real_t dt) {
+ // 2. Ball dropped from 0.2 m onto the plane with spin omega0 and restitution e: rebound velocity of
+ // the first impact. For e = 0, the ball stays in contact until it rolls (t < 1 s), and the convexified
+ // law (*) telescopes to the penetration mu h ||gamma_T^-|| after the impact (theta = 1).
+-void spinningImpact(config::SolverType solver, real_t dt, real_t omega0, real_t e) {
+-    const Run run = simulate(solver, dt, 1.0, kRadius + 0.2, 0.0, omega0, e);
+-    const std::string tag = std::string(name(solver)) + " impact, omega0=" + std::to_string(omega0) + " e=" + std::to_string(e) + " h=" + std::to_string(dt);
++void spinningImpact(const Variant& variant, real_t dt, real_t omega0, real_t e) {
++    const Run run = simulate(variant, dt, 1.0, kRadius + 0.2, 0.0, omega0, e);
++    const std::string tag = name(variant) + " impact, omega0=" + std::to_string(omega0) + " e=" + std::to_string(e) + " h=" + std::to_string(dt);
+ 
+     const Step* impact = nullptr;
+     for (const Step& s : run.steps)
+@@ -201,14 +214,14 @@ void spinningImpact(config::SolverType solver, real_t dt, real_t omega0, real_t
+     if (e == 0) std::cout << tag << ": penetration after the impact " << depth << " (convexified mu h slip = " << kMu * dt * slip << ")" << std::endl;
+ 
+     const Residuals res = lawResiduals(run, e);
+-    if (solver != config::SolverType::ProjectedJacobi) {
++    if (!variant.exactLaw()) {
+         check(res.convexified < 1e-6, tag + ": convexified law (*) holds in every step");
+         check(std::abs(vPlus - vConvex) < 1e-6 * V, tag + ": rebound velocity of the convexified law");
+         if (e == 0) check(std::abs(depth - kMu * dt * slip) < 2e-2 * kMu * dt * slip, tag + ": penetration mu h slip");
+     } else {
+-        check(res.exact < 1e-9, tag + ": exact Signorini law");
+-        check(std::abs(vPlus - e * V) < 1e-9, tag + ": rebound velocity e V");
+-        if (e == 0) check(std::abs(depth) < 1e-9, tag + ": no penetration after the impact");
++        check(res.exact < variant.exactTol(), tag + ": exact Signorini law");
++        check(std::abs(vPlus - e * V) < variant.exactTol(), tag + ": rebound velocity e V");
++        if (e == 0) check(std::abs(depth) < variant.exactTol(), tag + ": no penetration after the impact");
+     }
+ }
+ 
+@@ -216,20 +229,21 @@ void spinningImpact(config::SolverType solver, real_t dt, real_t omega0, real_t
+ 
+ int main() {
+     using config::SolverType;
+-    for (SolverType solver : {SolverType::ProjectedJacobi, SolverType::Qoco, SolverType::Clarabel, SolverType::Conicxx}) {
++    const Variant variants[] = {{SolverType::ProjectedJacobi, false}, {SolverType::Qoco, false}, {SolverType::Clarabel, false}, {SolverType::Conicxx, false}, {SolverType::Conicxx, true}};
++    for (const Variant& variant : variants) {
+         try {
+-            for (real_t dt : {1e-3, 5e-4, 2.5e-4}) slidingBall(solver, dt);
++            for (real_t dt : {1e-3, 5e-4, 2.5e-4}) slidingBall(variant, dt);
+             for (real_t dt : {1e-3, 1e-4}) {
+-                spinningImpact(solver, dt, 50.0, 0.5);  // sliding impact
+-                spinningImpact(solver, dt, 50.0, 0.0);
+-                spinningImpact(solver, dt, 10.0, 0.5);  // sticking impact
++                spinningImpact(variant, dt, 50.0, 0.5);  // sliding impact
++                spinningImpact(variant, dt, 50.0, 0.0);
++                spinningImpact(variant, dt, 10.0, 0.5);  // sticking impact
+             }
+         } catch (const std::exception& ex) {
+             if (std::string(ex.what()).find("Failed to load QOCO runtime backend") != std::string::npos) {
+-                std::cout << name(solver) << ": skipped (" << ex.what() << ")" << std::endl;
++                std::cout << name(variant) << ": skipped (" << ex.what() << ")" << std::endl;
+                 continue;
+             }
+-            check(false, std::string(name(solver)) + ": exception " + ex.what());
++            check(false, name(variant) + ": exception " + ex.what());
+         }
+     }
+     if (g_failures == 0) std::cout << "test_convexified_friction: all checks passed" << std::endl;

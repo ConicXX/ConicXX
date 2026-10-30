@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "conicxx/types.h"
 
@@ -26,6 +27,9 @@ enum class Status {
 };
 
 const char* toString(Status status);
+
+/// State of a Coulomb cone at the reported iterate, from the spectral values of its s and z.
+enum class ContactState : unsigned char { Undecided, Stick, Slip, TakeOff };
 
 struct Info {
   int iterations = 0;
@@ -53,6 +57,10 @@ struct Info {
 
   /// max(primal_residual, dual_residual, min(absolute gap, relative gap)) of the reported iterate.
   Scalar merit = 0;
+
+  /// Exact Coulomb friction: the duality gap above is the complementarity max_i ||s_i o z_i||
+  /// (unscaled), the primal residual uses the unsmoothed De Saxce term.
+  Scalar coulomb_smoothing = 0;  ///< c of the smoothing l = sqrt(||s_bar||^2 + (c mu)^2), scaled units
 };
 
 struct Solution {
@@ -62,6 +70,8 @@ struct Solution {
   Vec z;  ///< dual variables, z in K*
   Scalar objective = 0;
   Info info;
+  /// Per Coulomb cone (in the order of ConeSpec::soc_coulomb), empty without Coulomb cones.
+  std::vector<ContactState> contact_states;
 
   bool ok() const { return status == Status::Solved; }
 };

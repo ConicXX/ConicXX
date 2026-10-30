@@ -262,7 +262,14 @@ void QuasiDefiniteLdlt::analyzeSupernodes(const std::vector<Index>& etree) {
 }
 
 bool QuasiDefiniteLdlt::setPivot(Index k, Scalar d) {
-  if (params.dynamic_enable && d * sign_[k] < params.dynamic_eps) {
+  // The unsymmetric (Coulomb) matrix is not quasidefinite: a pivot of the unexpected sign is
+  // legitimate there, and only a tiny one is replaced (keeping its sign).
+  if (unsymmetric_) {
+    if (params.dynamic_enable && std::abs(d) < params.dynamic_eps) {
+      d = (d * sign_[k] < 0 ? -sign_[k] : sign_[k]) * params.dynamic_delta;
+      ++num_dyn_reg_;
+    }
+  } else if (params.dynamic_enable && d * sign_[k] < params.dynamic_eps) {
     d = sign_[k] * params.dynamic_delta;
     ++num_dyn_reg_;
   }
@@ -281,7 +288,76 @@ bool QuasiDefiniteLdlt::factorize(const SparseMat& K) {
     if (KtoC_[p] >= 0) Cx_[KtoC_[p]] = Kx[p];
   }
   num_dyn_reg_ = num_positive_ = 0;
+  unsymmetric_ = false;
   return supernodal_ ? factorizeSupernodal() : factorizeSimplicial();
+}
+
+bool QuasiDefiniteLdlt::factorizeUnsymmetric(const SparseMat& K, const Scalar* upper) {
+  if (!analyzed_ || K.nonZeros() != static_cast<Eigen::Index>(KtoC_.size())) return false;
+  const Index nnzL = Lp_[n_];
+  if (static_cast<Index>(Ux_.size()) != nnzL) Ux_.assign(nnzL, Scalar(0));
+  if (Cux_.size() != Cx_.size()) Cux_.assign(Cx_.size(), Scalar(0));
+  if (static_cast<Index>(yl_.size()) != n_) yl_.assign(n_, Scalar(0));
+  // Entry p = (r, c) of K_lower lands at C(min(a, b), max(a, b)), a = iperm(r), b = iperm(c):
+  // for a >= b it is the lower entry K'(a, b), for a < b the upper entry K'(a, b).
+  const Index* Kp = K.outerIndexPtr();
+  const Index* Ki = K.innerIndexPtr();
+  const Scalar* Kx = K.valuePtr();
+  for (Index c = 0; c < n_; ++c) {
+    for (Index p = Kp[c]; p < Kp[c + 1]; ++p) {
+      const Index q = KtoC_[p];
+      if (q < 0) continue;
+      if (iperm_[Ki[p]] >= iperm_[c]) {
+        Cx_[q] = Kx[p];
+        Cux_[q] = upper[p];
+      } else {
+        Cx_[q] = upper[p];
+        Cux_[q] = Kx[p];
+      }
+    }
+  }
+  num_dyn_reg_ = num_positive_ = 0;
+  unsymmetric_ = true;
+  if (!supernodal_) return factorizeUnsymmetricSimplicial();
+  if (sn_xu_.size() != sn_x_.size()) sn_xu_.assign(sn_x_.size(), Scalar(0));
+  return factorizeUnsymmetricSupernodal();
+}
+
+bool QuasiDefiniteLdlt::factorizeUnsymmetricSimplicial() {
+  // Up-looking LDU: row k of L solves U(0:k-1, 0:k-1)' (D L(k, :)') = K'(k, 0:k-1)', column k of U
+  // solves L(0:k-1, 0:k-1) (D U(:, k)) = K'(0:k-1, k); both over the reach of row k (the pattern
+  // is symmetric). y_ carries the upper column, yl_ the lower row.
+  for (Index k = 0; k < n_; ++k) {
+    Scalar d = sign_[k] * reg_[k];
+    for (Index p = Cp_[k]; p < Cp_[k + 1]; ++p) {
+      const Index i = Ci_[p];
+      if (i == k) {
+        d += Cx_[p];
+      } else {
+        y_[i] = Cux_[p];
+        yl_[i] = Cx_[p];
+      }
+    }
+    for (Index q = Rp_[k]; q < Rp_[k + 1]; ++q) {
+      const Index j = Rj_[q], pos = Rpos_[q];
+      const Scalar yj = y_[j], xj = yl_[j];
+      for (Index p = Lp_[j]; p < pos; ++p) {
+        y_[Li_[p]] -= Lx_[p] * yj;
+        yl_[Li_[p]] -= Ux_[p] * xj;
+      }
+      Lx_[pos] = xj * Dinv_[j];
+      Ux_[pos] = yj * Dinv_[j];
+      d -= xj * Ux_[pos];
+      y_[j] = Scalar(0);
+      yl_[j] = Scalar(0);
+    }
+    if (!setPivot(k, d)) {
+      std::fill(y_.begin(), y_.end(), Scalar(0));
+      std::fill(yl_.begin(), yl_.end(), Scalar(0));
+      return false;
+    }
+  }
+  return true;
 }
 
 bool QuasiDefiniteLdlt::factorizeSimplicial() {
@@ -423,6 +499,136 @@ bool QuasiDefiniteLdlt::factorizeSupernodal() {
   return true;
 }
 
+bool QuasiDefiniteLdlt::factorizeUnsymmetricSupernodal() {
+  // factorizeSupernodal() for K = L D U: every supernode holds the block of L (X) and the block of
+  // U^T (XU) in the same layout, and every update is done for both with the roles of L and U^T
+  // swapped. The diagonal lives in X only.
+  using MatMap = Eigen::Map<Mat, 0, Eigen::OuterStride<>>;
+  constexpr Index kPanel = 32;
+  const Index nsn = static_cast<Index>(sn_ptr_.size()) - 1;
+  std::fill(sn_x_.begin(), sn_x_.end(), Scalar(0));
+  std::fill(sn_xu_.begin(), sn_xu_.end(), Scalar(0));
+  std::fill(head_.begin(), head_.end(), -1);
+
+  for (Index sn = 0; sn < nsn; ++sn) {
+    const Index f = sn_ptr_[sn], l = sn_ptr_[sn + 1], w = l - f;
+    const Index* rows = &sn_rows_[sn_rows_ptr_[sn]];
+    const Index nr = sn_rows_ptr_[sn + 1] - sn_rows_ptr_[sn];
+    Scalar* X = &sn_x_[sn_x_ptr_[sn]];
+    Scalar* XU = &sn_xu_[sn_x_ptr_[sn]];
+    for (Index i = 0; i < nr; ++i) map_[rows[i]] = i;
+
+    for (Index c = f; c < l; ++c) {
+      Scalar* col = X + (c - f) * nr;
+      Scalar* colu = XU + (c - f) * nr;
+      col[c - f] = sign_[c] * reg_[c] + (diag_pos_[c] >= 0 ? Cx_[diag_pos_[c]] : Scalar(0));
+      for (Index q = lo_p_[c]; q < lo_p_[c + 1]; ++q) {
+        col[map_[lo_r_[q]]] = Cx_[lo_pos_[q]];
+        colu[map_[lo_r_[q]]] = Cux_[lo_pos_[q]];
+      }
+    }
+
+    // Updates from descendants: X -= L_d D_d U_d(:, cols), XU -= U_d^T D_d L_d(cols)'.
+    Index d = head_[sn];
+    head_[sn] = -1;
+    while (d != -1) {
+      const Index dnext = next_[d];
+      const Index fd = sn_ptr_[d], wd = sn_ptr_[d + 1] - fd;
+      const Index* rows_d = &sn_rows_[sn_rows_ptr_[d]];
+      const Index nrd = sn_rows_ptr_[d + 1] - sn_rows_ptr_[d];
+      const Scalar* Xd = &sn_x_[sn_x_ptr_[d]];
+      const Scalar* XUd = &sn_xu_[sn_x_ptr_[d]];
+      const Index p1 = dpos_[d];
+      Index p2 = p1;
+      while (p2 < nrd && rows_d[p2] < l) ++p2;
+      const Index m = nrd - p1, k = p2 - p1;
+      if (wd >= kMinProductRank) {
+        const MatMap Ld(const_cast<Scalar*>(Xd), nrd, wd, Eigen::OuterStride<>(nrd));
+        const MatMap Ud(const_cast<Scalar*>(XUd), nrd, wd, Eigen::OuterStride<>(nrd));
+        MatMap W(wbuf_.data(), m, wd, Eigen::OuterStride<>(m));
+        MatMap U(upd_.data(), m, k, Eigen::OuterStride<>(m));
+        for (Index t = 0; t < wd; ++t) W.col(t) = Ld.col(t).segment(p1, m) * D_[fd + t];
+        U.noalias() = W * Ud.block(p1, 0, k, wd).transpose();
+        for (Index jj = 0; jj < k; ++jj) {
+          Scalar* col = X + (rows_d[p1 + jj] - f) * nr;
+          for (Index ii = jj; ii < m; ++ii) col[map_[rows_d[p1 + ii]]] -= U(ii, jj);
+        }
+        for (Index t = 0; t < wd; ++t) W.col(t) = Ud.col(t).segment(p1, m) * D_[fd + t];
+        U.noalias() = W * Ld.block(p1, 0, k, wd).transpose();
+        for (Index jj = 0; jj < k; ++jj) {
+          Scalar* colu = XU + (rows_d[p1 + jj] - f) * nr;
+          for (Index ii = jj + 1; ii < m; ++ii) colu[map_[rows_d[p1 + ii]]] -= U(ii, jj);
+        }
+      } else {
+        for (Index jj = 0; jj < k; ++jj) {
+          Scalar* col = X + (rows_d[p1 + jj] - f) * nr;
+          Scalar* colu = XU + (rows_d[p1 + jj] - f) * nr;
+          for (Index t = 0; t < wd; ++t) {
+            const Scalar* Ldt = Xd + t * nrd;
+            const Scalar* Udt = XUd + t * nrd;
+            const Scalar coef_l = Udt[p1 + jj] * D_[fd + t];
+            const Scalar coef_u = Ldt[p1 + jj] * D_[fd + t];
+            if (coef_l != Scalar(0)) {
+              for (Index ii = jj; ii < m; ++ii) col[map_[rows_d[p1 + ii]]] -= Ldt[p1 + ii] * coef_l;
+            }
+            if (coef_u != Scalar(0)) {
+              for (Index ii = jj + 1; ii < m; ++ii) colu[map_[rows_d[p1 + ii]]] -= Udt[p1 + ii] * coef_u;
+            }
+          }
+        }
+      }
+      dpos_[d] = p2;
+      if (p2 < nrd) {
+        const Index t = sn_of_[rows_d[p2]];
+        next_[d] = head_[t];
+        head_[t] = d;
+      }
+      d = dnext;
+    }
+
+    // Dense LDU of the block, in panels as in factorizeSupernodal().
+    MatMap B(X, nr, w, Eigen::OuterStride<>(nr));
+    MatMap BU(XU, nr, w, Eigen::OuterStride<>(nr));
+    for (Index j0 = 0; j0 < w; j0 += kPanel) {
+      const Index pw = std::min(kPanel, w - j0);
+      for (Index j = j0; j < j0 + pw; ++j) {
+        Scalar dj = B(j, j);
+        for (Index t = j0; t < j; ++t) {
+          const Scalar vl = BU(j, t) * D_[f + t];  // D_t U(t, j)
+          const Scalar vu = B(j, t) * D_[f + t];   // L(j, t) D_t
+          dj -= B(j, t) * vl;
+          B.col(j).tail(nr - j - 1) -= B.col(t).tail(nr - j - 1) * vl;
+          BU.col(j).tail(nr - j - 1) -= BU.col(t).tail(nr - j - 1) * vu;
+        }
+        if (!setPivot(f + j, dj)) return false;
+        B.col(j).tail(nr - j - 1) *= Dinv_[f + j];
+        BU.col(j).tail(nr - j - 1) *= Dinv_[f + j];
+      }
+      const Index rest = w - j0 - pw;
+      if (rest > 0) {
+        MatMap W(wbuf_.data(), nr - j0 - pw, pw, Eigen::OuterStride<>(nr - j0 - pw));
+        for (Index t = 0; t < pw; ++t) W.col(t) = B.col(j0 + t).tail(nr - j0 - pw) * D_[f + j0 + t];
+        B.block(j0 + pw, j0 + pw, nr - j0 - pw, rest).noalias() -= W * BU.block(j0 + pw, j0, rest, pw).transpose();
+        for (Index t = 0; t < pw; ++t) W.col(t) = BU.col(j0 + t).tail(nr - j0 - pw) * D_[f + j0 + t];
+        BU.block(j0 + pw, j0 + pw, nr - j0 - pw, rest).noalias() -= W * B.block(j0 + pw, j0, rest, pw).transpose();
+      }
+    }
+
+    for (Index c = f; c < l; ++c) {
+      const Index jc = c - f;
+      std::copy(X + jc * nr + jc + 1, X + (jc + 1) * nr, Lx_.begin() + Lp_[c]);
+      std::copy(XU + jc * nr + jc + 1, XU + (jc + 1) * nr, Ux_.begin() + Lp_[c]);
+    }
+    if (nr > w) {
+      dpos_[sn] = w;
+      const Index t = sn_of_[rows[w]];
+      next_[sn] = head_[t];
+      head_[t] = sn;
+    }
+  }
+  return true;
+}
+
 void QuasiDefiniteLdlt::solveInPlace(Vec& x) const {
   for (Index j = 0; j < n_; ++j) {
     const Scalar xj = x[j];
@@ -430,9 +636,10 @@ void QuasiDefiniteLdlt::solveInPlace(Vec& x) const {
     for (Index p = Lp_[j]; p < Lp_[j + 1]; ++p) x[Li_[p]] -= Lx_[p] * xj;
   }
   for (Index j = 0; j < n_; ++j) x[j] *= Dinv_[j];
+  const std::vector<Scalar>& Ut = unsymmetric_ ? Ux_ : Lx_;
   for (Index j = n_ - 1; j >= 0; --j) {
     Scalar s = x[j];
-    for (Index p = Lp_[j]; p < Lp_[j + 1]; ++p) s -= Lx_[p] * x[Li_[p]];
+    for (Index p = Lp_[j]; p < Lp_[j + 1]; ++p) s -= Ut[p] * x[Li_[p]];
     x[j] = s;
   }
 }
@@ -451,12 +658,13 @@ void QuasiDefiniteLdlt::solvePairInPlace(Vec& y) const {
     y[2 * j] *= Dinv_[j];
     y[2 * j + 1] *= Dinv_[j];
   }
+  const std::vector<Scalar>& Ut = unsymmetric_ ? Ux_ : Lx_;
   for (Index j = n_ - 1; j >= 0; --j) {
     Scalar a = y[2 * j], b = y[2 * j + 1];
     for (Index p = Lp_[j]; p < Lp_[j + 1]; ++p) {
       const Index i = 2 * Li_[p];
-      a -= Lx_[p] * y[i];
-      b -= Lx_[p] * y[i + 1];
+      a -= Ut[p] * y[i];
+      b -= Ut[p] * y[i + 1];
     }
     y[2 * j] = a;
     y[2 * j + 1] = b;
@@ -465,6 +673,23 @@ void QuasiDefiniteLdlt::solvePairInPlace(Vec& y) const {
 
 Scalar QuasiDefiniteLdlt::residual(const Vec& x, Vec& r) const {
   r = bp_;
+  if (unsymmetric_) {
+    for (Index j = 0; j < n_; ++j) {
+      const Scalar xj = x[j];
+      Scalar s = 0;
+      for (Index p = Cp_[j]; p < Cp_[j + 1]; ++p) {
+        const Index i = Ci_[p];
+        if (i == j) {
+          s += Cx_[p] * xj;
+        } else {
+          r[i] -= Cux_[p] * xj;
+          s += Cx_[p] * x[i];
+        }
+      }
+      r[j] -= s;
+    }
+    return n_ > 0 ? r.lpNorm<Eigen::Infinity>() : Scalar(0);
+  }
   for (Index j = 0; j < n_; ++j) {
     const Scalar xj = x[j];
     Scalar s = 0;

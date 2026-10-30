@@ -50,6 +50,15 @@ class QuasiDefiniteLdlt {
   /// non-finite pivot (non-finite data, or dynamic regularization disabled).
   bool factorize(const SparseMat& K_lower);
 
+  /// Numeric LDU of an unsymmetric matrix K with the analyzed (symmetric) pattern: K_lower holds
+  /// the entries K(r, c), r >= c, and upper[p] the transposed entry K(c, r) of the stored entry p of
+  /// K_lower. K = L D U with unit triangular L and U, U stored as U^T in the pattern of L, the same
+  /// ordering, static regularization and supernodes as factorize(); dynamic regularization replaces
+  /// only tiny pivots (the matrix is not quasidefinite, so the pivot signs are not prescribed).
+  /// solve() and solvePair() then solve and refine with K. Used for the exact-Coulomb Newton matrix (docs/design.md, "Exact Coulomb
+  /// friction").
+  bool factorizeUnsymmetric(const SparseMat& K_lower, const Scalar* upper);
+
   /// Solves K x = b for the exact K of the last factorize(), with iterative refinement, and
   /// returns ||b - K x||_inf, or -1 if refinement is off (Params::refine_max_iter = 0) and no
   /// residual was computed. Resizes x if needed; allocation-free otherwise.
@@ -81,6 +90,8 @@ class QuasiDefiniteLdlt {
   void analyzeSupernodes(const std::vector<Index>& etree);
   bool factorizeSimplicial();
   bool factorizeSupernodal();
+  bool factorizeUnsymmetricSimplicial();
+  bool factorizeUnsymmetricSupernodal();
   /// Applies dynamic regularization to pivot k and stores it; false for a zero/non-finite pivot.
   bool setPivot(Index k, Scalar d);
   void solveInPlace(Vec& x) const;
@@ -98,6 +109,11 @@ class QuasiDefiniteLdlt {
   // Rpos_[q] in Li_/Lx_) for q in [Rp_[k], Rp_[k+1]), columns ascending.
   std::vector<Index> Lp_, Li_, Rp_, Rj_, Rpos_;
   std::vector<Scalar> Lx_, D_, Dinv_, sign_, reg_, y_;
+  // Unsymmetric factorization: Cux_ holds the upper triangle of P K P^T (Cx_ then the lower one,
+  // transposed into C's layout) and Ux_ the factor U, stored as U^T in L's pattern.
+  bool unsymmetric_ = false;
+  std::vector<Scalar> Cux_, Ux_, yl_;
+  std::vector<Scalar> sn_xu_;  // supernodal U^T blocks, laid out as sn_x_
   Vec bp_, xp_, xt_, r_, rt_;  // solve() and refinement workspaces, pivot order
   Vec xp2_, r2_, y2_;  // second right-hand side of solvePair(); y2_ interleaved
 

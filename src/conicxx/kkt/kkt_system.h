@@ -51,6 +51,13 @@ class KktSystem {
   /// Writes Hs from the current cone scalings and factorizes K.
   bool updateScalingAndFactorize(const ConeSet& cones);
 
+  /// Exact-Coulomb Newton matrix: as updateScalingAndFactorize(), but the (2,2) block of every SOC
+  /// block bi in coulomb_blocks becomes -(Hs + e_0 r'), r = row0.segment(offset, dim) of that
+  /// block, i.e. only its first row changes. K is then unsymmetric and factorized by
+  /// QuasiDefiniteLdlt::factorizeUnsymmetric(); solve() and solvePair() solve with it.
+  bool updateScalingAndFactorize(const ConeSet& cones, const std::vector<Index>& coulomb_blocks,
+                                 const Vec& row0);
+
   /// Applies regularization and refinement settings; no new setup() needed.
   void updateSettings(const Settings& settings);
 
@@ -75,6 +82,8 @@ class KktSystem {
 
  private:
   bool writePAValues(const SparseMat* P_upper, const SparseMat* A);
+  /// Writes -Hs (and the zero-cone compliance) into K and sets the static regularization.
+  void writeScaling(const ConeSet& cones);
   Scalar recordSolve(const Vec& rhs, Scalar residual);
 
   Index n_ = 0, m_ = 0;
@@ -99,6 +108,8 @@ class KktSystem {
   std::vector<std::vector<Index>> hs_slots_;  // per cone block, writeHsLowerTriangle() order
   Vec hs_scratch_;
   Vec compliance_;  // zero-cone compliance, empty if none
+  // Values of K's transposed entries for the unsymmetric (Coulomb) matrix, in K_'s value order.
+  std::vector<Scalar> upper_values_;
 
   // Sparsity patterns of P and A at setup().
   std::vector<Index> p_outer_ref_, p_inner_ref_, a_outer_ref_, a_inner_ref_;

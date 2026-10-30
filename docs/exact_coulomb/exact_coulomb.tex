@@ -1,0 +1,549 @@
+% Section of the CardilloCxx theory document (LaTeX/theory_doc.tex, which provides the preamble,
+% macros and the referenced equations of the other sections); moved here with the findings in
+% ../exact_coulomb_findings.md. Termination and results describe the intermediate global measure.
+%===============================================================================
+\section{Exact Coulomb friction with an interior-point method}\label{sec:exact_coulomb}
+%===============================================================================
+%
+Section~\ref{sec:conic} replaced the De~Saxc\'e shift $\mu\|\vxi_T\|$ by its value at the beginning of the step and obtained a convex SOCP. The resulting convexified law is not consistent for frictional impacts (Proposition~\ref{prop:ball_impact}). This section describes the interior-point method of ConicXX that solves the \emph{exact} law~\eqref{eq:desaxce} for all contacts at once, i.e., the second-order cone complementarity problem (SOCCP) with the shift evaluated at the unknown velocity. The method follows the analysis of Acary, Armand and Nguyen~\cite{Acary2026} and deviates from their algorithm in several places: the De~Saxc\'e variable is eliminated, the complementarity is linearized with Nesterov--Todd scaling, the shift is smoothed, the Newton matrix keeps the symmetric sparsity of the convex problem and is factorized by an unsymmetric $\vL\vD\vU$ decomposition, and the centering target is bounded below. To keep the section self-contained, the background on second-order cones (Section~\ref{sec:ec_jordan}), convex conic programming and interior-point methods (Section~\ref{sec:ec_ipm}) and numerical continuation (Section~\ref{sec:ec_continuation}) is included. Sections~\ref{sec:ec_tests} and~\ref{sec:ec_results} document the verification by minimal examples with closed-form solutions and the results in CardilloCxx.
+
+The implementation is \code{ConicXX/src/conicxx/ipm/coulomb\_ipm.cpp} (the loop), \code{cones/coulomb\_map.cpp} (the De~Saxc\'e term), \code{kkt/kkt\_system.cpp} and \code{kkt/quasidefinite\_ldlt.cpp} (Newton matrix and factorization), with the unit tests in \code{ConicXX/test/solver/test\_coulomb.cpp}. In CardilloCxx, the mode is selected by \code{conicxx.exact\_coulomb = on}.
+%
+%-------------------------------------------------------------------------------
+\subsection{The problem in standard form}\label{sec:ec_problem}
+%-------------------------------------------------------------------------------
+%
+We use the standard form of Section~\ref{sec:conic_program}: unknowns $\vx \in \mR^n$ (the velocities, and in the augmented form also the bilateral percussions), constraint rows $\mathsf{A} \in \mR^{m \times n}$, $\mathsf{b} \in \mR^m$, the slack $\vs \in \mR^m$ and the dual variable $\vz \in \mR^m$, both partitioned into blocks of the product cone
+%
+\begin{equation}\label{eq:ec_cone}
+	\cK = \{\mathbf{0}\}^{m_0} \times \Rp^{m_N} \times \cL^{d_1} \times \dots \times \cL^{d_{n_c}} \, , \qquad
+	\cL^{d} = \big\{(a, \bar{\va}) \in \mR \times \mR^{d-1} \, \big| \, \|\bar{\va}\| \leq a\big\} \, .
+\end{equation}
+%
+The zero cone holds the bilateral rows with the (diagonal, nonnegative) compliance $\mathsf{C}$, the orthant the frictionless contacts, and every frictional contact $i$ one Lorentz cone $\cL^3$ after the scaling~\eqref{eq:cone_scaling}. For a vector $\va$ of the slack dimension, $\va_i = (a_{i0}, \bar{\va}_i)$ denotes its block of cone $i$, and the matrix $\vE \in \mR^{m \times n_c}$ places one scalar per Coulomb cone into the first row of the cone, $(\vE \vl)_i = (l_i, \mathbf{0})$.
+%
+\paragraph{Exact law.} With the cone slack of the convex program, $\vs = \mathsf{b} - \mathsf{A}\vx = \vS \vxi$ for a frictional contact (now \emph{without} the frozen shift $\bar{\vc}$ in $\mathsf{b}$), the scaled De~Saxc\'e velocity of~\eqref{eq:desaxce} is $\vS \hat{\vxi} = \vS\vxi + (\mu\|\vxi_T\|, \mathbf{0}) = \vS\vxi + \vE\ell(\vS\vxi)$, since the tangential part of $\vS\vxi$ is $\mu\vxi_T$. Here
+%
+\begin{equation}\label{eq:ec_ell}
+	\ell(\vs) = \big(\|\bar{\vs}_1\|, \dots, \|\bar{\vs}_{n_c}\|\big) \in \mR^{n_c}
+\end{equation}
+%
+collects the tangential norms. We call the cone slack $\vs$ of the exact problem the \emph{modified velocity} and $\vu = \mathsf{b} - \mathsf{A}\vx + \mathsf{C}\vz_0$ (the relative velocity, including the compliance term of the zero-cone rows) its \emph{physical} part. Since $\vE$ changes only first rows and $\ell$ reads only tangential entries,
+%
+\begin{equation}\label{eq:ec_phi}
+	\vs = \vu + \vE\ell(\vu) \, , \qquad \vu = \vs - \vE \ell(\vs) \, , \qquad \ell(\vs) = \ell(\vu) \, ,
+\end{equation}
+%
+i.e., the map $\vu \mapsto \vs$ is invertible with an explicit inverse. The exact one-step problem in standard form is the system
+%
+\begin{subequations}\label{eq:ec_ccp}
+	\begin{align}
+		\mathsf{P}\vx + \mathsf{q} + \mathsf{A}\T\vz &= \mathbf{0} \, , \label{eq:ec_ccp_dual} \\
+		\mathsf{A}\vx - \mathsf{C}\vz_0 + \vs - \mathsf{b} - \vE\ell(\vs) &= \mathbf{0} \, , \label{eq:ec_ccp_primal} \\
+		\cK \ni \vs \perp \vz \in \cK \, , \label{eq:ec_ccp_compl}
+	\end{align}
+\end{subequations}
+%
+where $\vz_0$ is the zero-cone part of $\vz$ and $\mathsf{C}$ acts on it only. The orthant and the zero-cone blocks do not carry a shift.
+%
+\begin{proposition}\label{prop:ec_equivalence}
+	$(\vx, \vs, \vz)$ solves~\eqref{eq:ec_ccp} if and only if $\vu_\none = \vx$ (the velocity part), the percussions recovered by~\eqref{eq:conic_recovery} and the contact velocities $\vxi_i = \vS_{\mu_i}^{-1} \vu_i$ satisfy the balance of momentum, the bilateral force laws, Signorini's law for frictionless contacts and the Signorini--Coulomb law~\eqref{eq:contact_law} for every frictional contact.
+\end{proposition}
+%
+\begin{proof}
+	Stationarity~\eqref{eq:ec_ccp_dual} and the zero-cone and orthant rows are those of the convex program and give the balance of momentum, the bilateral force laws and Signorini's law as in Section~\ref{sec:conic_program}. For a frictional contact, \eqref{eq:ec_ccp_primal} reads $\vs_i = \vu_i + \vE\ell(\vs)_i$ with $\vu_i = \vS_{\mu_i}\vxi_i$, so by~\eqref{eq:ec_phi} $\vs_i = \vS_{\mu_i}\hat{\vxi}_i$ with the exact shift $\mu_i\|\vxi_{T,i}\|$. By~\eqref{eq:cone_scaling}, $\cL \ni \vs_i \perp \vz_i \in \cL$ is $\cK_{\mu_i}^* \ni \hat{\vxi}_i \perp \vpi_i \in \cK_{\mu_i}$, which is the Signorini--Coulomb law by Proposition~\ref{prop:desaxce}.
+\end{proof}
+%
+For a Coulomb cone, \eqref{eq:ec_phi} also shows what the cone constraint on $\vs$ means: $s_{i0} - \|\bar{\vs}_i\| = u_{i0}$, so
+%
+\begin{equation}\label{eq:ec_interior}
+	\vs_i \in \cL \iff u_{i0} \geq 0 \, , \qquad \vs_i \in \operatorname{int}\cL \iff u_{i0} > 0 \, ,
+\end{equation}
+%
+the primal cone condition is the nonpenetration condition of the normal velocity, and the cone $\cL$ for $\vs$ only encodes the friction law through its pairing with $\vz$. The coupling of the slack to itself through $\ell$ is what makes~\eqref{eq:ec_ccp} a complementarity problem rather than the optimality system of an optimization problem. We will also use the family with a coupling parameter $\varrho \in [0, 1]$, in which $\vE\ell$ is replaced by $\varrho\vE\ell$: $\varrho = 0$ is the convex relaxation of Anitescu~\cite{Anitescu2006} (the SOCP~\eqref{eq:socp} with $c_i = 0$), $\varrho = 1$ the exact problem.
+%
+%-------------------------------------------------------------------------------
+\subsection{The Jordan algebra of the second-order cone}\label{sec:ec_jordan}
+%-------------------------------------------------------------------------------
+%
+Interior-point methods for second-order cones are formulated in the Euclidean Jordan algebra associated with $\cL^d$~\cite{FarautKoranyi1994, AlizadehGoldfarb2003}. For $\vx = (x_0, \bar{\vx})$, $\vy = (y_0, \bar{\vy}) \in \mR \times \mR^{d-1}$ define
+%
+\begin{equation}\label{eq:ec_jordan_product}
+	\vx \circ \vy = \begin{pmatrix} \vx\T\vy \\ x_0 \bar{\vy} + y_0 \bar{\vx} \end{pmatrix} = \operatorname{Arw}(\vx)\vy \, , \qquad
+	\operatorname{Arw}(\vx) = \begin{pmatrix} x_0 & \bar{\vx}\T \\ \bar{\vx} & x_0 \vI \end{pmatrix} , \qquad
+	\ve = \begin{pmatrix} 1 \\ \mathbf{0} \end{pmatrix} .
+\end{equation}
+%
+The product is commutative but not associative, $\ve$ is its identity, and $\operatorname{Arw}(\vx)$ is the ``arrow'' matrix of $\vx$. With $\vJ = \diag(1, -\vI)$, every $\vx$ has the spectral decomposition
+%
+\begin{equation}\label{eq:ec_spectral}
+	\vx = \lambda_1 \vc_1 + \lambda_2 \vc_2 \, , \qquad
+	\lambda_{1,2} = x_0 \mp \|\bar{\vx}\| \, , \qquad
+	\vc_{1,2} = \tfrac{1}{2}\begin{pmatrix} 1 \\ \mp\bar{\vd} \end{pmatrix} , \quad \bar{\vd} = \frac{\bar{\vx}}{\|\bar{\vx}\|}
+\end{equation}
+%
+(any unit vector $\bar{\vd}$ if $\bar{\vx} = \mathbf{0}$), with the Jordan frame $\vc_1 \circ \vc_2 = \mathbf{0}$, $\vc_k \circ \vc_k = \vc_k$, $\vc_1 + \vc_2 = \ve$, $\|\vc_k\|^2 = \tfrac{1}{2}$. Then $\vx \in \cL$ ($\operatorname{int}\cL$) if and only if $\lambda_1 \geq 0$ ($> 0$); $\det\vx = \lambda_1\lambda_2 = \vx\T\vJ\vx$, $\operatorname{tr}\vx = 2x_0$, and for $\det\vx \neq 0$ the inverse with respect to $\circ$ is $\vx^{-1} = \vJ\vx / \det\vx$. The cone is self-dual, $\cL^* = \cL$, and $\vx\T\vy \geq 0$ for $\vx, \vy \in \cL$. The \emph{quadratic representation}
+%
+\begin{equation}\label{eq:ec_quad_rep}
+	\vP(\vx) = 2\operatorname{Arw}(\vx)^2 - \operatorname{Arw}(\vx \circ \vx) = 2\vx\vx\T - (\det\vx)\vJ
+\end{equation}
+%
+has the eigenvalues $\lambda_1^2$, $\lambda_2^2$ on $\vc_1$, $\vc_2$ and $\lambda_1\lambda_2$ on the directions orthogonal to $\vc_1$, $\vc_2$, and $\vP(\vx)$ maps $\operatorname{int}\cL$ onto itself for $\vx \in \operatorname{int}\cL$.
+%
+\begin{lemma}\label{lem:ec_complementarity}
+	For $\vs, \vz \in \cL$, the conditions $\vs\T\vz = 0$ and $\vs \circ \vz = \mathbf{0}$ are equivalent. If both hold and $\vs, \vz \neq \mathbf{0}$, then $\vs = \lambda\vc_2$ and $\vz = \lambda'\vc_1$ in a common Jordan frame with $\lambda, \lambda' > 0$.
+\end{lemma}
+%
+\begin{proof}
+	$\vs\circ\vz = \mathbf{0}$ implies $\vs\T\vz = 0$ by its first entry. Conversely, $s_0 z_0 \geq \|\bar{\vs}\|\|\bar{\vz}\| \geq -\bar{\vs}\T\bar{\vz}$, so $\vs\T\vz = 0$ requires equality in both estimates. If $\vs$ or $\vz$ vanishes, there is nothing to show. Otherwise $s_0 = \|\bar{\vs}\| > 0$, $z_0 = \|\bar{\vz}\| > 0$ and $\bar{\vz} = -(z_0/s_0)\bar{\vs}$, so $s_0\bar{\vz} + z_0\bar{\vs} = \mathbf{0}$, and with $\bar{\vd} = \bar{\vs}/s_0$ we get $\vs = 2s_0\vc_2$, $\vz = 2z_0\vc_1$.
+\end{proof}
+%
+For several cones, all operations act blockwise; for the orthant, $\circ$ is the elementwise product with $\ve = \mathbf{1}$ (degree one per row), and for the zero cone all quantities vanish. The \emph{degree} of $\cK$ is $\nu = m_N + n_c$ (one per Lorentz cone), and $\ve\T\ve = \nu$.
+
+For the pair $\vs = \lambda\vc_2$, $\vz = \lambda'\vc_1$ of Lemma~\ref{lem:ec_complementarity}, $\bar{\vs}$ and $\bar{\vz}$ point in opposite directions. In the Coulomb problem, $\bar{\vs}_i = \mu\vxi_{T,i}$ and $\bar{\vz}_i = \vpi_{T,i}/\mu$: the friction percussion opposes the sliding velocity, and the alignment of the two tangential directions is the friction law. This geometric fact explains the behavior of the complementarity measures in Section~\ref{sec:ec_floor}.
+%
+%-------------------------------------------------------------------------------
+\subsection{Convex conic programming and primal-dual interior-point methods}\label{sec:ec_ipm}
+%-------------------------------------------------------------------------------
+%
+\paragraph{Duality.} The convex program of Section~\ref{sec:conic_program} (with $\varrho = 0$, ignoring the compliance for the moment) is
+%
+\begin{equation}\label{eq:ec_socp}
+	\min_{\vx} \ \tfrac{1}{2}\vx\T\mathsf{P}\vx + \mathsf{q}\T\vx \qquad \text{subject to} \quad \mathsf{A}\vx + \vs = \mathsf{b} \, , \quad \vs \in \cK \, ,
+\end{equation}
+%
+with $\mathsf{P} \succeq \mathbf{0}$. Its Lagrangian dual is $\max_{\vx, \vz} -\tfrac{1}{2}\vx\T\mathsf{P}\vx - \mathsf{b}\T\vz$ subject to $\mathsf{P}\vx + \mathsf{q} + \mathsf{A}\T\vz = \mathbf{0}$, $\vz \in \cK^*$. For feasible points the duality gap is $\vs\T\vz \geq 0$ (weak duality). If the Slater condition holds (a strictly feasible $\vs \in \operatorname{int}\cK$ exists), the optimal values agree and the KKT conditions
+%
+\begin{equation}\label{eq:ec_kkt}
+	\mathsf{P}\vx + \mathsf{q} + \mathsf{A}\T\vz = \mathbf{0} \, , \qquad
+	\mathsf{A}\vx + \vs - \mathsf{b} = \mathbf{0} \, , \qquad
+	\cK \ni \vs \perp \vz \in \cK
+\end{equation}
+%
+are necessary and sufficient for optimality~\cite{AlizadehGoldfarb2003}. By Lemma~\ref{lem:ec_complementarity}, the complementarity can be written as $\vs\circ\vz = \mathbf{0}$ with $\vs, \vz \in \cK$, a system of $n + 2m$ equations in $n + 2m$ unknowns, together with the cone constraints.
+%
+\paragraph{Barrier and central path.} The logarithmic barrier $-\ln\det\vs$ of $\cL$ (and $-\ln s_j$ of the orthant) is a self-concordant barrier of degree $\nu$. Adding the barrier term $-\frac{\tau}{2}\sum_i \ln\det\vs_i$ (and $-\tau\sum_j\ln s_j$ for the orthant) to the objective of~\eqref{eq:ec_socp} and writing the optimality conditions of this barrier problem with the multiplier $\vz = \tau\vs^{-1}$ (the gradient of $\ln\det\vs_i$ is $2\vs_i^{-1}$) gives the \emph{perturbed KKT system}
+%
+\begin{equation}\label{eq:ec_central}
+	\mathsf{P}\vx + \mathsf{q} + \mathsf{A}\T\vz = \mathbf{0} \, , \qquad
+	\mathsf{A}\vx + \vs - \mathsf{b} = \mathbf{0} \, , \qquad
+	\vs\circ\vz = \tau\ve \, , \qquad \vs, \vz \in \operatorname{int}\cK \, .
+\end{equation}
+%
+Under the Slater condition and with a bounded optimal set,~\eqref{eq:ec_central} has a unique solution $(\vx(\tau), \vs(\tau), \vz(\tau))$ for every $\tau > 0$; this \emph{central path} is analytic and converges to an optimal point for $\tau \to 0$. On the central path, $\vs\T\vz = \tau\nu$, so $\tau = \vs\T\vz/\nu$ is the natural measure of progress. Primal-dual interior-point methods apply damped Newton steps to~\eqref{eq:ec_central} while decreasing $\tau$, and keep $\vs$, $\vz$ in the interior by the step length~\cite{Wright1997, NocedalWright2006}.
+%
+\paragraph{Scaling.} Linearizing $\vs\circ\vz = \tau\ve$ directly gives $\operatorname{Arw}(\vz)\,\Delta\vs + \operatorname{Arw}(\vs)\,\Delta\vz = \tau\ve - \vs\circ\vz$ (the AHO direction, used in~\cite{Acary2026}). Since $\operatorname{Arw}(\vs)$ and $\operatorname{Arw}(\vz)$ do not commute, the eliminated system is not symmetric and the direction is not invariant under the automorphisms of the cone. The standard remedy is a \emph{scaling}: a symmetric positive definite $\vV$ (block diagonal over the cones) with $\vV\cK = \cK$ is applied as $\tilde{\vs} = \vV^{-1}\vs$, $\tilde{\vz} = \vV\vz$, which keeps $\vs\T\vz = \tilde{\vs}\T\tilde{\vz}$ and the central path ($\vs\circ\vz = \tau\ve \iff \tilde{\vs}\circ\tilde{\vz} = \tau\ve$ for automorphisms of the form $\vP(\cdot)^{1/2}$), and the complementarity is linearized in the scaled variables. The \emph{Nesterov--Todd (NT) scaling}~\cite{Nesterov1997, Nesterov1998} is the unique $\vV = \vP(\vw)^{1/2}$-type automorphism with
+%
+\begin{equation}\label{eq:ec_nt}
+	\vV^{-1}\vs = \vV\vz =: \vv \, , \qquad \text{i.e.,} \quad \vV^2\vz = \vs \, ,
+\end{equation}
+%
+the scaled point $\vv$ being the same for $\vs$ and $\vz$. For $\cL^d$ it has the closed form (Domahidi, Chu and Boyd~\cite{Domahidi2013}; \code{cones/soc\_kernels.h})
+%
+\begin{equation}\label{eq:ec_nt_formula}
+	\begin{gathered}
+		a = \sqrt{\det\vs} \, , \quad b = \sqrt{\det\vz} \, , \quad \eta = \sqrt{a/b} \, , \quad
+		\gamma = \sqrt{\tfrac{1}{2}\big(1 + \vs\T\vz/(ab)\big)} \, , \quad
+		\vw = \frac{1}{2\gamma}\Big(\frac{\vs}{a} + \frac{\vJ\vz}{b}\Big) , \\
+		\vV = \eta\begin{pmatrix} w_0 & \bar{\vw}\T \\ \bar{\vw} & \vI + \frac{\bar{\vw}\bar{\vw}\T}{1 + w_0} \end{pmatrix} , \qquad
+		\vH := \vV^2 = \eta^2(2\vw\vw\T - \vJ) \, , \qquad \vw\T\vJ\vw = 1 \, ,
+	\end{gathered}
+\end{equation}
+%
+with $\vV^{-1} = \vJ\vV\vJ/\eta^2$. For the orthant, $\vV = \diag(\sqrt{s_j/z_j})$. The quantity
+%
+\begin{equation}\label{eq:ec_centrality}
+	\lambda_{\min}(\vv\circ\vv) = \frac{\det\vs\,\det\vz}{\vs\T\vz + \sqrt{(\vs\T\vz)^2 - \det\vs\,\det\vz}}
+\end{equation}
+%
+(per cone, computed from $\vs$ and $\vz$ without forming $\vv$) measures the centrality: on the central path $\vv\circ\vv = \tau\ve$, so $\lambda_{\min}(\vv\circ\vv) = \tau$.
+%
+\paragraph{The Newton system.} With residuals $\vr_d = \mathsf{P}\vx + \mathsf{q} + \mathsf{A}\T\vz$, $\vr_p = \mathsf{A}\vx + \vs - \mathsf{b}$ and the scaled linearization of $\vv\circ\vv = \sigma\tau\ve$,
+%
+\begin{equation}\label{eq:ec_scaled_lin}
+	\vv\circ\big(\vV\Delta\vz + \vV^{-1}\Delta\vs\big) = \sigma\tau\ve - \vv\circ\vv - \vr_{\mathrm{corr}} \, ,
+\end{equation}
+%
+($\sigma \in [0, 1]$ the centering parameter and $\vr_{\mathrm{corr}}$ a second-order correction, see below), $\Delta\vs$ is eliminated as
+%
+\begin{equation}\label{eq:ec_ds}
+	\Delta\vs = -\vH\Delta\vz - \vd_s \, , \qquad
+	\vd_s = \vV\big(\vv \backslash (\vv\circ\vv + \vr_{\mathrm{corr}} - \sigma\tau\ve)\big) \, ,
+\end{equation}
+%
+where $\vv \backslash \va$ solves $\vv\circ\vy = \va$ (i.e., $\vy = \operatorname{Arw}(\vv)^{-1}\va$). The remaining system for $(\Delta\vx, \Delta\vz)$ is the symmetric quasidefinite KKT system
+%
+\begin{equation}\label{eq:ec_kkt_matrix}
+	\begin{pmatrix} \mathsf{P} & \mathsf{A}\T \\ \mathsf{A} & -\vH - \mathsf{C} \end{pmatrix}
+	\begin{pmatrix} \Delta\vx \\ \Delta\vz \end{pmatrix}
+	= \begin{pmatrix} -\vr_d \\ -\vr_p + \vd_s \end{pmatrix} ,
+\end{equation}
+%
+where the compliance $\mathsf{C}$ of the zero-cone rows enters the (2,2) block (and $-\mathsf{C}\vz_0$ the residual $\vr_p$), and $\vH = \mathbf{0}$ on zero-cone rows, so that $\Delta\vs = \mathbf{0}$ there. For the affine direction ($\sigma = 0$, $\vr_{\mathrm{corr}} = \mathbf{0}$), $\vd_s = \vV\vv = \vs$.
+%
+\paragraph{Mehrotra's predictor-corrector.} One factorization of~\eqref{eq:ec_kkt_matrix} serves two solves per iteration~\cite{Mehrotra1992}. The \emph{predictor} (affine direction) gives the largest step $\alpha_{\mathrm{aff}} \in (0, 1]$ that keeps $\vs, \vz$ in $\cK$ and the predicted gap $\tau_{\mathrm{aff}} = (\vs + \alpha_{\mathrm{aff}}\Delta\vs_{\mathrm{aff}})\T(\vz + \alpha_{\mathrm{aff}}\Delta\vz_{\mathrm{aff}})/\nu$. The centering parameter is chosen as $\sigma = (\tau_{\mathrm{aff}}/\tau)^3$: if the affine step makes good progress, little centering is needed. The \emph{corrector} uses $\vr_{\mathrm{corr}} = (\vV^{-1}\Delta\vs_{\mathrm{aff}})\circ(\vV\Delta\vz_{\mathrm{aff}})$, the second-order term that the affine step neglects. The step is then $\alpha = \gamma_b\,\alpha_{\max}$ with the step to the boundary $\alpha_{\max}$ and a fraction $\gamma_b = 0.99$, followed by a backtracking until the trial point lies in the neighborhood
+%
+\begin{equation}\label{eq:ec_neighborhood}
+	\cN(\beta) = \big\{(\vs, \vz) \in \operatorname{int}\cK \times \operatorname{int}\cK \, \big| \, \lambda_{\min}(\vv_i\circ\vv_i) \geq \beta\,\tau \text{ for every cone } i\big\} \, ,
+\end{equation}
+%
+$\beta = 10^{-4}$ (\code{Settings::centrality\_theta}), a wide neighborhood of the central path.
+%
+\paragraph{Homogeneous self-dual embedding.} ConicXX solves the convex program not by~\eqref{eq:ec_central} directly but by its homogeneous self-dual embedding~\cite{Ye1994}, as Clarabel~\cite{Goulart2024} and ECOS~\cite{Domahidi2013}: two further variables $\tau_h, \kappa \geq 0$ with $\tau_h\kappa$ complementary make the embedded problem always feasible, the solution is recovered as $(\vx, \vs, \vz)/\tau_h$, and $\tau_h \to 0$ yields certificates of primal or dual infeasibility. The certificates rest on the duality of the convex program and have no meaning for the Coulomb problem, which is not an optimization problem; there, existence is guaranteed by the Slater condition instead (Section~\ref{sec:ec_existence}). The Coulomb method therefore uses the plain infeasible-start iteration~\eqref{eq:ec_central} without embedding.
+%
+%-------------------------------------------------------------------------------
+\subsection{Existence of solutions and of a central path}\label{sec:ec_existence}
+%-------------------------------------------------------------------------------
+%
+For the analysis, the velocities are eliminated. Let $\mathsf{P} = \vM \succ \mathbf{0}$, no zero-cone rows, and $\vG = \mathsf{A}\mathsf{P}^{-1}\mathsf{A}\T \succeq \mathbf{0}$ (the scaled Delassus matrix), $\vg = \mathsf{b} + \mathsf{A}\mathsf{P}^{-1}\mathsf{q}$, so that $\vx = -\mathsf{P}^{-1}(\mathsf{q} + \mathsf{A}\T\vz)$ and $\vu = \vG\vz + \vg$. The problem~\eqref{eq:ec_ccp} becomes
+%
+\begin{equation}\label{eq:ec_reduced}
+	\vs = \vG\vz + \vg + \vE\vl \, , \qquad \vl = \ell(\vs) \, , \qquad \cK \ni \vs \perp \vz \in \cK \, .
+\end{equation}
+%
+\begin{proposition}[Acary, Cadoux, Lemar\'echal, Malick~\cite{Acary2011}]\label{prop:ec_existence}
+	If the Slater condition holds, i.e., there is $\vx$ with $\mathsf{b} - \mathsf{A}\vx \in \operatorname{int}\cK$ (equivalently, there is no $\vz \in \cK \setminus \{\mathbf{0}\}$ with $\vG\vz = \mathbf{0}$ and $\vg\T\vz \leq 0$), then~\eqref{eq:ec_reduced} has a solution.
+\end{proposition}
+%
+The proof is a fixed-point argument that we sketch, because the same argument yields the central path~\cite{Acary2026}. For a fixed shift $\vl \in \mR^{n_c}_{\geq 0}$, \eqref{eq:ec_reduced} without the second equation is the optimality system of the convex program $\min_{\vz \in \cK} \tfrac{1}{2}\vz\T\vG\vz + (\vg + \vE\vl)\T\vz$ (the relaxed SOCP with the frozen shift $\vl$, as in Section~\ref{sec:conic_program}). The Slater condition persists for $\vl \geq \mathbf{0}$, since $\vE\vl$ only adds to the first entries and moves points deeper into $\cK$. For $\tau > 0$, the barrier problem $\min_{\vz} \tfrac{1}{2}\vz\T\vG\vz + (\vg + \vE\vl)\T\vz - \tfrac{\tau}{2}\sum_i \ln\det\vz_i$ is strictly convex and has a unique minimizer $\vz(\tau, \vl)$, which together with $\vs(\tau, \vl) = \tau\vz(\tau, \vl)^{-1}$ solves the perturbed system $\vs = \vG\vz + \vg + \vE\vl$, $\vs\circ\vz = \tau\ve$; it depends continuously (even analytically) on $\vl$ by the implicit function theorem, since the Hessian $\vG + \tau\vP(\vz)^{-1}$ is positive definite.
+%
+\begin{proposition}[central path~\cite{Acary2026}]\label{prop:ec_central_path}
+	Let the Slater condition hold and $\tau > 0$. Then the perturbed Coulomb system
+	%
+	\begin{equation}\label{eq:ec_perturbed}
+		\vs = \vG\vz + \vg + \vE\ell(\vs) \, , \qquad \vs\circ\vz = \tau\ve \, , \qquad \vs, \vz \in \operatorname{int}\cK
+	\end{equation}
+	%
+	has a solution. For $\tau \in (0, \bar{\tau}]$ all solutions are bounded, every accumulation point for $\tau \to 0$ solves~\eqref{eq:ec_reduced}, and for every such limit there is an analytic curve of solutions of~\eqref{eq:ec_perturbed} that converges to it.
+\end{proposition}
+%
+\begin{proof}
+	Define $F_{\tau}(\vl) = \ell\big(\vs(\tau, \vl)\big)$ for $\vl \geq \mathbf{0}$. A fixed point $\vl = F_{\tau}(\vl)$ gives a solution of~\eqref{eq:ec_perturbed}. $F_{\tau}$ is continuous. For boundedness, $\vz(\tau, \vl)\T\vE\vl \geq 0$ and $\vz\T\vs = \tau\nu$ give $\vz\T\vG\vz + \vg\T\vz \leq \tau\nu$, and under the Slater condition the set $\{\vz \in \cK \, | \, \vz\T\vG\vz + \vg\T\vz \leq c\}$ is compact for every $c \geq 0$ (otherwise a recession direction $\hat{\vz} \in \cK$, $\|\hat{\vz}\| = 1$, with $\vG\hat{\vz} = \mathbf{0}$ and $\vg\T\hat{\vz} \leq 0$ would exist). So $\vz(\tau, \vl)$ is bounded independently of $\vl$, and so is $\bar{\vs} = \overline{\vG\vz + \vg}$ (the shift does not change tangential entries) and with it $F_{\tau}$. Brouwer's theorem on a ball intersected with $\mR^{n_c}_{\geq 0}$ gives a fixed point. The same bound holds uniformly for $\tau \leq \bar{\tau}$, so the solutions are bounded and accumulation points exist; passing to the limit in~\eqref{eq:ec_perturbed} gives~\eqref{eq:ec_reduced}. For the analytic curve, the set of $(\vz, \vs, \vl, \tau)$ with $\vs = \vG\vz + \vg + \vE\vl$, $l_i^2 = \|\bar{\vs}_i\|^2$, $l_i \geq 0$, $\vs\circ\vz = \tau\ve$, $\tau > 0$, $\det\vs_i, \det\vz_i, s_{i0}, z_{i0} > 0$ is semi-algebraic, every limit lies in its closure, and the curve selection lemma~\cite{Milnor1968} gives an analytic semi-algebraic curve $t \mapsto (\vz(t), \vs(t), \vl(t), \tau(t))$ in the set with the limit at $t = 0$; since $\tau(t) > 0$ and $\tau(0) = 0$, $\tau$ is strictly increasing on some $(0, \epsilon)$ and can be used as parameter there.
+\end{proof}
+%
+Two remarks are important for the algorithm. First, uniqueness is lost: the central path need not be unique, and its parametrization by $\tau$ need not be monotone globally. Acary et al.\ observed paths along which $\tau$ increases over a stretch (turning points of $\tau$ along the curve), where a method that decreases $\tau$ in every step cannot follow the path~\cite{Acary2026}. This motivates continuation methods (Section~\ref{sec:ec_continuation}). Second, the analytic curve exists only near $\tau = 0$; the starting point is not on a known branch. Starting from the convex relaxation ($\varrho = 0$), whose central path is unique, and continuing in $\varrho$ selects a branch (Section~\ref{sec:ec_continuation}).
+%
+%-------------------------------------------------------------------------------
+\subsection{Smoothing of the De Saxc\'e term}\label{sec:ec_smoothing}
+%-------------------------------------------------------------------------------
+%
+The derivative of $\ell_i(\vs) = \|\bar{\vs}_i\|$ is $\bar{\vs}_i\T/\|\bar{\vs}_i\|$, undefined at $\bar{\vs}_i = \mathbf{0}$, and its curvature $1/\|\bar{\vs}_i\|$ is unbounded. For a sticking contact, $\vs_i \to \mathbf{0}$ along the central path, so the Newton model of $\ell_i$ degrades exactly there. Acary et al.\ use $\bar{\vs}_i/\|\bar{\vs}_i\|$ and observed that $\bar{\vs}_i = \mathbf{0}$ does not occur in practice; for their ANM they replace $l_i = \|\bar{\vs}_i\|$ by the quadratic $l_i^2 = \|\bar{\vs}_i\|^2$, whose Jacobian $2\diag(\vl)$ is singular for sticking contacts. We use the smoothing (cf.~\cite{Fukushima2002} for smoothing functions of SOCCPs)
+%
+\begin{equation}\label{eq:ec_smoothing}
+	\ell_{\epsilon,i}(\vs) = \sqrt{\|\bar{\vs}_i\|^2 + \epsilon^2} \, , \qquad
+	\vL_i := \frac{\partial \ell_{\epsilon,i}}{\partial \vs_i} = \Big(0, \frac{\bar{\vs}_i\T}{\ell_{\epsilon,i}}\Big) , \qquad
+	\frac{\partial \ell_{\epsilon,i}}{\partial \epsilon} = \frac{\epsilon}{\ell_{\epsilon,i}} \, ,
+\end{equation}
+%
+with $\epsilon = c\,\tau$ tied to the barrier parameter. It has the properties
+%
+\begin{equation}\label{eq:ec_smoothing_props}
+	0 \leq \ell_{\epsilon,i} - \|\bar{\vs}_i\| \leq \epsilon \, , \qquad \|\vL_i\| < 1 \ (\epsilon > 0) \, , \qquad \|\nabla^2_{\bar{\vs}}\ell_{\epsilon,i}\| \leq 1/\ell_{\epsilon,i} \leq 1/\epsilon \, ,
+\end{equation}
+%
+it is analytic for $\epsilon > 0$, and $\ell_{\epsilon,i}^2 = \|\bar{\vs}_i\|^2 + c^2\tau^2$ is polynomial in $(\vs, l_i, \tau)$.
+%
+\begin{proposition}\label{prop:ec_smoothed_path}
+	Proposition~\ref{prop:ec_central_path} holds for the smoothed system, in which $\ell$ in~\eqref{eq:ec_perturbed} is replaced by $\ell_{c\tau}$, with the same limits: every accumulation point for $\tau \to 0$ solves the exact problem~\eqref{eq:ec_reduced}, and analytic curves to the limits exist.
+\end{proposition}
+%
+\begin{proof}
+	In the proof of Proposition~\ref{prop:ec_central_path}, $F_{\tau}(\vl) = \ell_{c\tau}(\vs(\tau, \vl))$ is continuous, nonnegative, and bounded by $\|\bar{\vs}\| + c\tau$, so Brouwer's theorem applies as before, and the bounds are uniform for $\tau \leq \bar{\tau}$. In the limit, $\ell_{c\tau} \to \ell$ uniformly by~\eqref{eq:ec_smoothing_props}. For the curve selection, replace $l_i^2 = \|\bar{\vs}_i\|^2$ by $l_i^2 = \|\bar{\vs}_i\|^2 + c^2\tau^2$, which keeps the set semi-algebraic and contains every limit $(\vz^*, \vs^*, \ell(\vs^*), 0)$ in its closure.
+\end{proof}
+%
+The scaling of $\epsilon$ with $\tau$ is linear for a reason: on the central path, a sticking contact has $\vs_i = \tau\vz_i^{-1} = \cO(\tau)$, so $\|\bar{\vs}_i\| = \cO(\tau)$, and $\epsilon = c\tau$ acts on the same scale. A smoothing $\epsilon = \sqrt{c\tau}$ would dominate $\bar{\vs}_i$ for all sticking contacts and introduce a primal error of order $\sqrt{\tau}$. The constant $c$ has the unit of an inverse force; ConicXX uses $c = c_{\mathrm{rel}}/z_{\mathrm{ref}}$ with the median $z_{\mathrm{ref}}$ of the normal components $z_{i0}$ of the starting point (in equilibrated units), fixed for the solve, and $c_{\mathrm{rel}} = 0.1$ (\code{CoulombSettings::smoothing}); $c_{\mathrm{rel}} = 0$ gives the unsmoothed method with $\vL_i = \mathbf{0}$ at $\bar{\vs}_i = \mathbf{0}$. The iteration freezes $\epsilon = c\tau_k$ within iteration $k$; the termination test always uses the unsmoothed $\ell$. The primal residual of the exact problem exceeds that of the smoothed one by at most $c\tau_k$, which vanishes with $\tau_k$.
+%
+%-------------------------------------------------------------------------------
+\subsection{The Newton system of the Coulomb problem}\label{sec:ec_newton}
+%-------------------------------------------------------------------------------
+%
+The perturbed system that is followed is~\eqref{eq:ec_central} with the primal residual
+%
+\begin{equation}\label{eq:ec_residuals}
+	\vr_d = \mathsf{P}\vx + \mathsf{q} + \mathsf{A}\T\vz \, , \qquad
+	\vr_p = \mathsf{A}\vx - \mathsf{C}\vz_0 + \vs - \mathsf{b} - \varrho\vE\ell_\epsilon(\vs) \, .
+\end{equation}
+%
+The De~Saxc\'e variable $\vl$ of Acary et al.\ is not an unknown: $\vl = \ell_\epsilon(\vs)$ holds by construction, which removes their residual $\|\vl - \ell(\vu)\|$ and the heuristic of their Step~3 that balances it against the complementarity. With $\vL = \blkdiag(\vL_i) \in \mR^{n_c \times m}$, the derivative of~\eqref{eq:ec_residuals} with respect to $\vs$ is $\vI - \varrho\vE\vL$.
+%
+\begin{lemma}\label{lem:ec_nilpotent}
+	$\vL\vE = \mathbf{0}$. Hence $(\vE\vL)^2 = \mathbf{0}$, $(\vI - \varrho\vE\vL)^{-1} = \vI + \varrho\vE\vL =: \vB$ and $\det(\vI - \varrho\vE\vL) = 1$.
+\end{lemma}
+%
+\begin{proof}
+	$\vE$ writes into first entries of the cones, and $\vL_i$ vanishes on the first entry. Then $(\vI - \varrho\vE\vL)(\vI + \varrho\vE\vL) = \vI - \varrho^2\vE(\vL\vE)\vL = \vI$, and $\vI - \varrho\vE\vL$ is unit triangular in a suitable ordering of each cone.
+\end{proof}
+%
+The linearization of~\eqref{eq:ec_ccp_dual}, \eqref{eq:ec_ccp_primal} and~\eqref{eq:ec_scaled_lin} is
+%
+\begin{equation}\label{eq:ec_newton_full}
+	\mathsf{P}\Delta\vx + \mathsf{A}\T\Delta\vz = -\vr_d \, , \qquad
+	\mathsf{A}\Delta\vx - \mathsf{C}\Delta\vz_0 + \vB^{-1}\Delta\vs = -\vr_p \, , \qquad
+	\Delta\vs = -\vH\Delta\vz - \vd_s \, .
+\end{equation}
+%
+Inserting the third equation into the second gives the \emph{reduced Newton system}
+%
+\begin{equation}\label{eq:ec_newton}
+	\begin{pmatrix} \mathsf{P} & \mathsf{A}\T \\ \mathsf{A} & -\vB^{-1}\vH - \mathsf{C} \end{pmatrix}
+	\begin{pmatrix} \Delta\vx \\ \Delta\vz \end{pmatrix}
+	= \begin{pmatrix} -\vr_d \\ -\vr_p + \vB^{-1}\vd_s \end{pmatrix} .
+\end{equation}
+%
+Multiplying the second block row by $\vB$ instead gives the equivalent form with the blocks $\vB\mathsf{A}$ and $-\vH - \vB\mathsf{C}$ (the latter is $-\vH - \mathsf{C}$ since $\vB$ is the identity on zero-cone rows), which keeps the (2,2) block symmetric but changes the (2,1) block: row $0$ of every Coulomb cone becomes a combination of the three rows of $\mathsf{A}$, whose sparsity pattern is the union of theirs. Form~\eqref{eq:ec_newton} keeps $\mathsf{A}$ and $\mathsf{A}\T$ unchanged and modifies only the diagonal blocks of the Coulomb cones,
+%
+\begin{equation}\label{eq:ec_N}
+	\vN_i := \vB_i^{-1}\vH_i = \vH_i - \varrho\,\ve_0(\vH_i\vL_i\T)\T \, ,
+\end{equation}
+%
+i.e., only row $0$ of $\vH_i$. The Newton matrix has the sparsity pattern of the convex KKT matrix, and its symbolic analysis (ordering, elimination tree, supernodes) is reused unchanged. It is unsymmetric in exactly the entries $(0, 1), (0, 2)$ and the value of $(0, 0)$ of every Coulomb block.
+%
+\begin{proposition}\label{prop:ec_N00}
+	For $\vs_i, \vz_i \in \operatorname{int}\cL$, $\epsilon > 0$ and $\varrho \in [0, 1]$,
+	%
+	\begin{equation}
+		N_{i,00} = \eta^2\big(2w_0^2 - 1 - 2\varrho\,w_0\,\bar{\vw}\T\bar{\vl}\big) \geq \eta^2\big(w_0 - \sqrt{w_0^2 - 1}\big)^2 > 0 \, ,
+	\end{equation}
+	%
+	with $\vL_i = (0, \bar{\vl}\T)$ and $\eta, \vw$ of~\eqref{eq:ec_nt_formula}. A Coulomb block that is eliminated before the rows coupled to it therefore keeps the pivot sign $-1$ of the cone rows.
+\end{proposition}
+%
+\begin{proof}
+	With $\vH = \eta^2(2\vw\vw\T - \vJ)$: $\ve_0\T\vH\ve_0 = \eta^2(2w_0^2 - 1)$ and $\ve_0\T\vH\vL\T = \eta^2(2w_0\vw\T\vL\T - \ve_0\T\vJ\vL\T) = 2\eta^2 w_0\bar{\vw}\T\bar{\vl}$, since $\vL\T$ has a zero first entry. $\vw\T\vJ\vw = 1$ gives $\|\bar{\vw}\| = \sqrt{w_0^2 - 1}$ and $w_0 \geq 1$, and $\|\bar{\vl}\| < 1$ by~\eqref{eq:ec_smoothing_props}, so $\varrho\bar{\vw}\T\bar{\vl} \leq \sqrt{w_0^2 - 1}$, and $2w_0^2 - 1 - 2w_0\sqrt{w_0^2 - 1} = (w_0 - \sqrt{w_0^2 - 1})^2 > 0$.
+\end{proof}
+%
+\paragraph{Structure near a sliding contact.} The following computation explains what the Coulomb term does to the Newton matrix and is the basis of the choice of the linear solver. On the central path, $\vs = \tau\vz^{-1}$, so $\vs$ and $\vz$ share a Jordan frame $\vc_\pm = \frac{1}{2}(1, \pm\bar{\vd})$, $\vz = z_-\vc_- + z_+\vc_+$, $\vs = s_-\vc_- + s_+\vc_+$ with $s_\pm = \tau/z_\pm$, and the NT scaling is $\vH = \tau\vP(\vz)^{-1} = \tau\vP(\vz^{-1})$. Writing $h_\pm = \tau/z_\pm^2$ and $h_{\perp} = \tau/(z_+z_-)$, $\vH = 2h_+\vc_+\vc_+\T + 2h_-\vc_-\vc_-\T + h_{\perp}\vt\vt\T$ with $\vt = (0, \bar{\vt})$, $\bar{\vt} \perp \bar{\vd}$, by the eigenstructure of~\eqref{eq:ec_quad_rep}. A sliding contact has $\vz \to z_-\vc_-$ and $\vs \to s_+\vc_+$, i.e., $z_+ \to 0$ and $h_+ \to \infty$, $h_- \to 0$.
+%
+\begin{proposition}\label{prop:ec_sliding_structure}
+	In this situation, with $\bar{\vl} = \bar{\vd}$ (no smoothing) and $\varrho = 1$,
+	%
+	\begin{equation}\label{eq:ec_sliding_N}
+		\vN = \begin{pmatrix} 0 \\ \bar{\vd} \end{pmatrix}\big(h_+\vc_+ - h_-\vc_-\big)\T + h_{\perp}\vt\vt\T \, ,
+		\qquad \text{whereas} \qquad
+		\vH = 2h_+\vc_+\vc_+\T + 2h_-\vc_-\vc_-\T + h_{\perp}\vt\vt\T \, .
+	\end{equation}
+\end{proposition}
+%
+\begin{proof}
+	$\vL\T = (0, \bar{\vd}) = \vc_+ - \vc_-$, so $\vH\vL\T = h_+\vc_+ + h_-\vc_-$ (using $\vc_\pm\T\vc_\pm = \frac{1}{2}$, $\vc_+\T\vc_- = 0$, $\vt\T\vc_\pm = 0$). With $\ve_0 = \vc_+ + \vc_-$,
+	$\vN = \vH - \ve_0(h_+\vc_+ + h_-\vc_-)\T = h_+(\vc_+ - \vc_-)\vc_+\T + h_-(\vc_- - \vc_+)\vc_-\T + h_{\perp}\vt\vt\T$, which is~\eqref{eq:ec_sliding_N}.
+\end{proof}
+%
+The first row of $\vN$ vanishes in this limit: the normal row of a sliding Coulomb cone in~\eqref{eq:ec_newton} reads $\mathsf{A}_{i0}\Delta\vx = \dots$, i.e., the normal velocity of a sliding contact is a hard constraint, as it must be for $u_{i0} = 0$, while the large stiffness $h_+$ acts in the tangential direction $\bar{\vd}$. In the symmetric matrix of the convex relaxation, the same stiffness $2h_+\vc_+\vc_+\T$ couples the normal and the tangential row (the relaxation lets the contact separate along $\vc_+$). The two matrices differ at the leading order $h_+ = \cO(1/\tau)$ on every sliding contact. Consequently, a Krylov method (GMRES) preconditioned with the factorization of the symmetric convex matrix, which would reuse the existing symmetric factorization, faces a preconditioned operator $\vI + \text{(rank-}n_c\text{ term of order one)}$ and needs about one iteration per sliding contact. ConicXX therefore factorizes~\eqref{eq:ec_newton} directly.
+%
+%-------------------------------------------------------------------------------
+\subsection{Factorization of the unsymmetric Newton matrix}\label{sec:ec_ldu}
+%-------------------------------------------------------------------------------
+%
+\paragraph{Quasidefinite matrices.} A symmetric matrix $\begin{psmallmatrix} \vF & \mathsf{A}\T \\ \mathsf{A} & -\vG' \end{psmallmatrix}$ with $\vF \succ \mathbf{0}$, $\vG' \succ \mathbf{0}$ is \emph{quasidefinite}. Vanderbei~\cite{Vanderbei1995} showed that every symmetric permutation of a quasidefinite matrix has an $\vL\vD\vL\T$ factorization with $\vD$ diagonal, positive for the rows of the first and negative for the rows of the second block, so the ordering can be chosen for sparsity alone (a fill-reducing AMD ordering), without pivoting for stability. The convex KKT matrix~\eqref{eq:ec_kkt_matrix} is only semidefinite in general ($\mathsf{P} \succeq \mathbf{0}$, $\vH + \mathsf{C} \succeq \mathbf{0}$ with zero rows for equalities), so ConicXX adds a static regularization $\pm\delta_s$ to the pivots only and replaces pivots of the wrong sign or of tiny magnitude by $\pm\delta_d$ during the factorization (dynamic regularization), and removes the effect of both by iterative refinement against the unregularized matrix: $\vy \leftarrow \vy + \tilde{\vK}^{-1}(\vr - \vK\vy)$ with the regularized factor $\tilde{\vK}$, which converges if $\rho(\vI - \tilde{\vK}^{-1}\vK) < 1$.
+%
+\paragraph{Unsymmetric LDU on the same structure.} The pattern of~\eqref{eq:ec_newton} is symmetric, so the elimination tree and the row structure of $\vL$ of the symmetric analysis are those of an unsymmetric factorization $\vK = \vL\vD\vU$ with unit triangular $\vL$, $\vU$ and $\vU\T$ in the pattern of $\vL$. In the up-looking form, for every $k$ in the pivot order,
+%
+\begin{equation}\label{eq:ec_updown}
+	\vL_{1:k-1,1:k-1}\vD\,\vU_{1:k-1,k} = \vK_{1:k-1,k} \, , \qquad
+	\vU_{1:k-1,1:k-1}\T\vD\,\vL_{k,1:k-1}\T = \vK_{k,1:k-1}\T \, , \qquad
+	D_k = K_{kk} - \sum_{j<k} L_{kj}D_jU_{jk} \, ,
+\end{equation}
+%
+two sparse triangular solves over the same reach of row $k$ in the elimination tree (the symmetric algorithm needs one). The supernodal variant stores for every supernode the dense block of $\vL$ and the dense block of $\vU\T$ in the same layout, and every update $\vX \leftarrow \vX - \vL_d\vD_d\vU_d$ of the symmetric code is applied twice with the roles of $\vL$ and $\vU\T$ exchanged. The cost of the factorization is about twice that of the symmetric one; the triangular solves use $\vL$ forward and $\vU$ backward, and the refinement uses both stored triangles of the exact matrix (\code{QuasiDefiniteLdlt::factorizeUnsymmetric}).
+%
+\paragraph{Pivot rule.} Proposition~\ref{prop:ec_N00} shows that a Coulomb block eliminated first keeps the sign of the cone rows. A body row eliminated after the cones coupled to it does not: its pivot is a diagonal entry of the Schur complement $\mathsf{P} + \mathsf{A}\T\vN^{-1}\mathsf{A}$, and $\vN^{-1} = \vH^{-1}\vB$ is not definite (for the sliding limit of Proposition~\ref{prop:ec_sliding_structure}, $\vH^{-1} = \frac{2}{h_+}\vc_+\vc_+\T + \frac{2}{h_-}\vc_-\vc_-\T + \frac{1}{h_{\perp}}\vt\vt\T$ and $\vH^{-1}\vB$ has the large part $\frac{1}{h_-}\vc_-\ve_0\T$: the force direction $\vc_-$, i.e.\ the edge of the friction cone, times the normal velocity; since $\vc_-$ and $\ve_0$ enclose $45^\circ$, its symmetric part is indefinite). A pivot of the ``wrong'' sign is legitimate for the Coulomb matrix, and replacing it by $+\delta_d$, as the dynamic regularization of the quasidefinite case would, destroys the factorization. In a hyperstatic test (Section~\ref{sec:ec_tests}) this happened in the last iterations and produced a refinement residual of $4 \cdot 10^{31}$. The unsymmetric factorization therefore replaces only pivots with $|D_k| < \delta_{\mathrm{eps}}$, keeping their sign. The static regularization is unchanged. On the CardilloCxx scenes of Section~\ref{sec:ec_results}, no pivot was replaced.
+%
+%-------------------------------------------------------------------------------
+\subsection{The interior-point iteration}\label{sec:ec_loop}
+%-------------------------------------------------------------------------------
+%
+Algorithm~\ref{alg:ec_ipm} summarizes one solve. All quantities are in equilibrated units: ConicXX scales rows and columns by a Ruiz equilibration with one common factor per cone block, which maps $\cL$ onto itself and, since $\ell$ is positively homogeneous of degree one, leaves the form of~\eqref{eq:ec_ccp} unchanged.
+%
+\begin{algorithm}[t]
+	\caption{Coulomb interior-point method (\code{CoulombIpm::solve}).}\label{alg:ec_ipm}
+	\Input{$(\vx, \vs, \vz)$ with $\vs, \vz \in \operatorname{int}\cK$; $c = c_{\mathrm{rel}}/z_{\mathrm{ref}}$; tolerances}
+	\For{$k = 0, 1, \dots$}{
+		$\tau \leftarrow \vs\T\vz/\nu$; evaluate $\vr_d$, $\vr_p$ with $\ell$ (exact) and $\max_i\|\vs_i\circ\vz_i\|$; stop if converged\;
+		$\epsilon \leftarrow c\tau$; evaluate $\ell_\epsilon(\vs)$, $\vL$; $\vr_p \leftarrow \vr_p$ with $\ell_\epsilon$\;
+		NT scaling $\vV$, $\vH$ of $(\vs, \vz)$; factorize~\eqref{eq:ec_newton} with $\vN_i = \vH_i - \ve_0(\vH_i\vL_i\T)\T$\;
+		predictor: solve~\eqref{eq:ec_newton} with $\vd_s = \vs$; $\Delta\vs_{\mathrm{aff}} = -\vH\Delta\vz_{\mathrm{aff}} - \vs$; $\alpha_{\mathrm{aff}}$, $\tau_{\mathrm{aff}}$, $\sigma = (\tau_{\mathrm{aff}}/\tau)^3$\;
+		target $\tau_t = \max(\sigma\tau, \tau_{\mathrm{floor}})$\;
+		$\vr_{\mathrm{corr}} = (\vV^{-1}\Delta\vs_{\mathrm{aff}})\circ(\vV\Delta\vz_{\mathrm{aff}})$ if $\sigma\tau \geq \tau_{\mathrm{floor}}$, else $\mathbf{0}$\;
+		corrector: solve~\eqref{eq:ec_newton} with $\vd_s$ of~\eqref{eq:ec_ds} for $\tau_t$; $\Delta\vs = -\vH\Delta\vz - \vd_s$\;
+		$\alpha \leftarrow 0.99\,\alpha_{\max}$, backtrack ($\alpha \leftarrow 0.8\alpha$) into $\cN(\beta)$; $(\vx, \vs, \vz) \mathrel{+}= \alpha(\Delta\vx, \Delta\vs, \Delta\vz)$\;
+	}
+\end{algorithm}
+%
+\paragraph{Starting point and warm start.} The cold start is that of the convex solver: with $\vH = \vI$, one solve of~\eqref{eq:ec_kkt_matrix} with right-hand side $(-\mathsf{q}, \mathsf{b})$ gives $\vx$ and $\vz$, $\vs = -\vz$, and $\vs$, $\vz$ are shifted into the interior along $\ve$. This is the least-squares point of the convex relaxation; the iteration then runs with $\varrho = 1$ from the first step. A warm start $(\vx, \vs, \vz)$ (the solution of the previous solve, or one supplied by the caller) is projected onto $\cK$ and recentered, $(\vx, \vs, \vz) \leftarrow \lambda(\vx, \vs, \vz) + (1 - \lambda)(\mathbf{0}, \ve, \ve)$ with $\lambda = 0.99$, so that every complementarity pair is at least $(1 - \lambda)^2$. The warm start is used if its merit $\max(\text{residuals}, \text{complementarity})$ is not above that of the cold start. A warm-started solve that fails is repeated from the cold start. Without the embedding, the warm start keeps the scale of the previous solution, which is the reason for the much lower iteration counts than in the embedded convex solver in Section~\ref{sec:ec_results}.
+%
+\paragraph{Termination.} The iterate is accepted if, in user units and relative as in the convex solver,
+%
+\begin{equation}\label{eq:ec_termination}
+	\frac{\|\vr_p^{\,\ell}\|_\infty}{\max(1, \|\mathsf{b}\|_\infty + \|\vx\|_\infty + \|\vs\|_\infty)} \leq \varepsilon_{\mathrm{feas}} \, , \quad
+	\frac{\|\vr_d\|_\infty}{\max(1, \|\mathsf{q}\|_\infty + \|\vx\|_\infty + \|\vz\|_\infty)} \leq \varepsilon_{\mathrm{feas}} \, , \quad
+	\max_i \frac{\|\vs_i\circ\vz_i\|}{V\|\vz_i\| + Z\|\vs_i\|} \leq \varepsilon_{\mathrm{rel}} \, ,
+\end{equation}
+%
+with $\vr_p^{\,\ell}$ the primal residual with the unsmoothed term, the velocity scale $V = \max(\|\vx\|_\infty, \|\vs\|_\infty, \|\mathsf{q}\|_\infty/\max_j \mathsf{P}_{jj})$ (the last term is the free velocity, which keeps $V$ positive when all contacts stick) and the impulse scale $Z = \max(\|\mathsf{q}\|_\infty, \|\vz\|_\infty)$; orthant rows count as cones of dimension one. For an active contact ($\vs_i \to \mathbf{0}$, $\|\vs_i\circ\vz_i\| \approx \|\vs_i\|\|\vz_i\|$) the quotient is its velocity error relative to $V$, for a separating one ($\vz_i \to \mathbf{0}$) its impulse error relative to $Z$, so the tolerance means the same as for the residuals. Otherwise, the best iterate is reported with the status \code{AlmostSolved} if it meets reduced tolerances.
+
+The first version of the method used $\max_i\|\vs_i\circ\vz_i\| \leq \varepsilon_\mathrm{abs}$, the criterion of~\cite{Acary2026}, which has the unit velocity times impulse. It accepts normal velocities $\varepsilon_\mathrm{abs}/\|\vz_i\|$ of active contacts, which on the domino scene (percussions $10^{-4}$ to $10^{-2}\,\mathrm{Ns}$, $\varepsilon_\mathrm{abs} = 10^{-5}$) were $3\,\mathrm{mm/s}$ on average and up to $8\,\mathrm{cm/s}$. Since $\vs_i \in \operatorname{int}\cL \iff u_{i0} > 0$ by~\eqref{eq:ec_interior}, every interior iterate lets \emph{all} active contacts separate, so this error systematically injects energy, and the dominos bounced. Normalizations with a floor, $\max(1, \cdot)$ as in the residuals, fail for the same reason: with $Z = 1$, every contact with $\|\vz_i\| < \varepsilon$ counts as separated, whatever its velocity. The norm $\|\mathsf{b}\|$ is not part of $V$, since the position-level bias of stiff bilateral rows is not a velocity of the contacts.
+%
+\paragraph{Contact states.} The final iterate classifies every Coulomb cone by the spectral values $\lambda_1 \leq \lambda_2$ of $\vs_i$ and $\vz_i$ (in equilibrated units, where $\vs$ and $\vz$ have comparable magnitudes) with the threshold $t = \sqrt{\tau}$: separation if $\lambda_2(\vz_i) \leq t < \lambda_1(\vs_i)$, sticking if $\lambda_1(\vz_i) > t \geq \lambda_2(\vs_i)$, sliding if $\lambda_1(\vz_i) \leq t < \lambda_2(\vz_i)$ and $\lambda_1(\vs_i) \leq t < \lambda_2(\vs_i)$, otherwise undecided. Near the central path, the vanishing spectral values are $\cO(\tau)$ and the others $\cO(1)$, so $\sqrt{\tau}$ separates them (\code{Solution::contact\_states}).
+%
+\subsubsection{Why the centering target is bounded below}\label{sec:ec_floor}
+%
+The NT neighborhood~\eqref{eq:ec_neighborhood} controls $\vs\T\vz$ and the eigenvalues of $\vv\circ\vv$, but not the Jordan product $\vs\circ\vz$ in the unscaled variables, which is what~\eqref{eq:ec_termination} measures and what expresses the friction law (Lemma~\ref{lem:ec_complementarity}).
+%
+\begin{proposition}\label{prop:ec_misalignment}
+	Let $\vs = s_+\vc_+(\bar{\vd}) + s_-\vc_-(\bar{\vd})$ and $\vz = z_-\vc_-(\bar{\vd}') + z_+\vc_+(\bar{\vd}')$ with $s_+, z_- = \cO(1)$, $s_-z_-, s_+z_+ = \cO(\tau)$ and an angle $\varphi$ between the unit vectors $\bar{\vd}$, $\bar{\vd}'$ (a sliding pair whose friction direction is misaligned by $\varphi$). Then, to leading order,
+	%
+	\begin{equation}
+		\vs\T\vz = \cO(\tau) + \tfrac{1}{8}s_+z_-\varphi^2 \, , \qquad
+		\|\vs\circ\vz\| = \cO(\tau) + \tfrac{1}{4}s_+z_-\varphi \, ,
+	\end{equation}
+	%
+	and the pair lies in $\cN(\beta)$ for $\tfrac{1}{8}s_+z_-\varphi^2 \leq \kappa\tau$ with $\beta \approx 1/(2(2 + \kappa))$. In $\cN(\beta)$, therefore, $\|\vs\circ\vz\|$ can be of order $\sqrt{\tau\,s_+z_-}$.
+\end{proposition}
+%
+\begin{proof}
+	$\vc_+(\bar{\vd})\T\vc_-(\bar{\vd}') = \frac{1}{4}(1 - \cos\varphi) \approx \frac{1}{8}\varphi^2$ gives the dominant cross term of $\vs\T\vz$. The tangential part of $\vs\circ\vz$ is $s_0\bar{\vz} + z_0\bar{\vs} \approx \frac{s_+}{2}\big({-\frac{z_-}{2}}\bar{\vd}'\big) + \frac{z_-}{2}\frac{s_+}{2}\bar{\vd} = \frac{s_+z_-}{4}(\bar{\vd} - \bar{\vd}')$ with $\|\bar{\vd} - \bar{\vd}'\| \approx \varphi$. With $\det\vs\det\vz = s_+s_-z_+z_- = \cO(\tau^2)$ and $\vs\T\vz \leq (2 + \kappa)\tau$, \eqref{eq:ec_centrality} gives $\lambda_{\min}(\vv\circ\vv) \geq \det\vs\det\vz/(2\vs\T\vz)$, which is of order $\tau/(2(2 + \kappa))$ if $s_-z_-$, $s_+z_+$ are of order $\tau$.
+\end{proof}
+%
+Mehrotra's rule with $\sigma \approx 0$ near the solution drives $\tau$ down by a factor of about 100 per iteration, while $\|\vs\circ\vz\|$ only follows like $\sqrt{\tau}$. In the hyperstatic box of Section~\ref{sec:ec_tests}, $\tau$ reached $10^{-17}$ with $\|\vs\circ\vz\| = 5 \cdot 10^{-8}$; the Newton matrix then lost all accuracy (refinement residual $10^{-9}$ and worse) and the run ended \code{AlmostSolved}. From a warm start, whose pairs carry the sliding direction of the previous step, $\|\vs\circ\vz\|$ decreased only by a factor of 5 per iteration. The remedy is to stop decreasing $\tau$ once it is small enough: on the central path $\vs_i\circ\vz_i = \tau\ve$, so $\|\vs_i\circ\vz_i\| = \tau$. The centering target is bounded below by
+%
+\begin{equation}\label{eq:ec_floor}
+	\tau_{\mathrm{floor}} = f\,\varepsilon_{\mathrm{rel}}\,\min_i\big(V\|\vz_i\| + Z\|\vs_i\|\big) \, , \qquad f = 0.1 \ (\code{CoulombSettings::mu\_floor}) \, ,
+\end{equation}
+%
+in equilibrated units of $\vs\circ\vz$ (on the central path, every cone then meets~\eqref{eq:ec_termination}), and once the bound is active the second-order term $\vr_{\mathrm{corr}}$ is dropped, since it belongs to the affine direction towards $\tau = 0$ and spoils the centering step. The steps are then Newton steps for the perturbed system at the fixed $\tau_{\mathrm{floor}}$, which converge quadratically to its central point, where every cone meets the complementarity test. The fixed $\tau$ also fixes the smoothing $\epsilon = c\tau_{\mathrm{floor}}$, which keeps the smoothing error below the tolerance. With the bound, the box converges to $10^{-9}$ in 11 iterations, and the complementarity of the warm-started example drops from $10^{-5}$ to $2 \cdot 10^{-10}$ in four steps at fixed $\tau$. The AHO linearization of~\cite{Acary2026} targets $\vs\circ\vz$ directly and does not have this issue, but it lacks the scaling invariance and the symmetric structure that the NT direction provides.
+%
+%-------------------------------------------------------------------------------
+\subsection{Continuation methods}\label{sec:ec_continuation}
+%-------------------------------------------------------------------------------
+%
+The Mehrotra iteration presumes that the central path can be followed with decreasing $\tau$. Proposition~\ref{prop:ec_central_path} does not guarantee this, and Acary et al.\ document failures caused by turning points of $\tau$ along the path, which they overcome with a path-following (continuation) method~\cite{Acary2026}. We summarize the methods; Section~\ref{sec:ec_cont_status} states what is implemented.
+%
+\paragraph{Natural and pseudo-arclength continuation.} Let $\vF(\vy, \tau) = \mathbf{0}$, $\vy = (\vx, \vs, \vz)$, be the perturbed system~\eqref{eq:ec_central} with~\eqref{eq:ec_residuals}, $\epsilon = c\tau$, and $\vs\circ\vz = \tau\ve$ exactly. Its solution set is, generically, a curve in $(\vy, \tau)$. \emph{Natural continuation} uses $\tau$ as parameter: predictor $\vy' = -\vF_{\vy}^{-1}\vF_{\tau}$ (the tangent), corrector Newton at fixed $\tau$. It fails at a \emph{turning point}, where $\vF_{\vy}$ is singular and the curve turns back in $\tau$. \emph{Pseudo-arclength continuation}~\cite{AllgowerGeorg2003} parametrizes by arclength $a$: with the unit tangent $\vt = (\vt_y, t_{\tau})$, $\vF_{\vy}\vt_y + \vF_{\tau} t_{\tau} = \mathbf{0}$, oriented consistently with the previous tangent, the predictor is $(\vy, \tau) + h\vt$ and the corrector solves the bordered system
+%
+\begin{equation}\label{eq:ec_bordered}
+	\begin{pmatrix} \vF_{\vy} & \vF_{\tau} \\ \vt_y\T\vW_a & t_{\tau} \end{pmatrix}
+	\begin{pmatrix} \Delta\vy \\ \Delta\tau \end{pmatrix}
+	= -\begin{pmatrix} \vF \\ g \end{pmatrix} , \qquad
+	g = \vt\T\vW_a\big((\vy, \tau) - (\vy, \tau)_{\mathrm{pred}}\big) \, ,
+\end{equation}
+%
+with a weighting $\vW_a$ of the arclength. The bordered matrix is nonsingular at simple turning points, where $\vF_{\vy}$ is not. It is solved with the factorization of $\vF_{\vy}$ only: $\vF_{\vy}\va = -\vF$ and $\vF_{\vy}\vb = -\vF_{\tau}$, then
+%
+\begin{equation}
+	\Delta\tau = \frac{-g - \vt_y\T\vW_a\va}{\vt_y\T\vW_a\vb + t_{\tau}} \, , \qquad \Delta\vy = \va + \Delta\tau\,\vb \, .
+\end{equation}
+%
+For the Coulomb problem, $\vF_{\vy}$ is the Newton matrix of~\eqref{eq:ec_newton_full}, so both solves use the reduced system~\eqref{eq:ec_newton} with one factorization; $\vF_{\tau} = (\mathbf{0}, -\vE\,\partial\ell_\epsilon/\partial\epsilon\;c, -\ve)$ enters the right-hand side through the same elimination of $\Delta\vs$. A turning point shows as a sign change of $t_{\tau}$. A weighting in the NT-scaled coordinates ($\|\vV^{-1}\Delta\vs\|$, $\|\vV\Delta\vz\|$) makes the arclength invariant under the scaling of the data.
+%
+\paragraph{Homotopy in the coupling.} The family $\varrho \in [0, 1]$ of Section~\ref{sec:ec_problem} connects the convex relaxation, whose central path is unique, to the exact problem. Continuing in $\varrho$ at a fixed moderate $\tau$ (predictor from $\vF_{\vy}\vy' = -\vF_{\varrho}$ with $\vF_{\varrho} = (\mathbf{0}, -\vE\ell_\epsilon(\vs), \mathbf{0})$, Newton corrector) from the convex central point to $\varrho = 1$ gives every solve the same well-defined starting branch, which addresses the starting-point sensitivity reported in~\cite{Acary2026}.
+%
+\paragraph{Asymptotic numerical method.} The ANM~\cite{Cochelin1994} used by Acary et al.\ writes the system with quadratic nonlinearities only, $\vR(\vy, \tau) = \vA_0\vy + \vb_0 + \vQ(\vy, \vy) - \tau\vf_0 = \mathbf{0}$; for the Coulomb problem, the bilinear terms are $\vs\circ\vz$ and $\vl\bullet\vl - \ell(\vs)\bullet\ell(\vs)$ (with $\vl$ kept as unknown and $\bullet$ the elementwise product; with smoothing, $-c^2\tau^2$ is added, which is again polynomial). Inserting the series $\vy(a) = \sum_{k=0}^N \vy_k a^k$, $\tau(a) = \sum_{k=0}^N \tau_k a^k$ and collecting powers of $a$ gives, for every order $k \geq 1$, a linear system with the \emph{same} matrix $\vR_{\vy}(\vy_0)$,
+%
+\begin{equation}
+	\vR_{\vy}(\vy_0)\vy_k - \tau_k\vf_0 = -\sum_{j=1}^{k-1}\vQ(\vy_j, \vy_{k-j}) \, , \qquad \vy_k\T\vy_1 + \tau_k\tau_1 = \delta_{k1}\kappa^2 \, ,
+\end{equation}
+%
+so that one factorization yields the whole series. The validity range is estimated as $a_{\max} = (\varepsilon_{\mathrm{ANM}}\|\vy_1\|/\|\vy_N\|)^{1/(N-1)}$, and the series is evaluated at $a_{\max}$ to give the next starting point; Pad\'e approximants extend the range. ANM traces turning points without special treatment, at the cost of $N \approx 25$ solves per step in~\cite{Acary2026}.
+%
+\subsubsection{Status in ConicXX}\label{sec:ec_cont_status}
+%
+Neither the $\varrho$-homotopy nor pseudo-arclength continuation nor ANM is implemented. With the per-cone complementarity measure, the Mehrotra iteration fails on the slinky scene at $10^{-6}$ at degenerate stick-slip contacts (Section~\ref{sec:ec_results}); whether this is a turning point of the path or a failure of the Newton model of the De~Saxc\'e term at $\bar{\vs}_i \approx \mathbf{0}$ is open. The building blocks needed for the bordered corrector (one factorization, several right-hand sides, the derivative $\partial\ell_\epsilon/\partial\epsilon$) are available, and the natural place for a fallback is the restart after a failed solve. Without continuation, a failure exits with \code{InsufficientProgress} (two consecutive steps below $10^{-4}$) and the best iterate.
+%
+%-------------------------------------------------------------------------------
+\subsection{Verification by minimal examples}\label{sec:ec_tests}
+%-------------------------------------------------------------------------------
+%
+The unit tests (\code{test\_coulomb.cpp}) check every kernel separately and then the solver on problems with closed-form solutions. All solver tests check the exact conditions~\eqref{eq:ec_ccp} directly on the returned unscaled solution: stationarity, the primal equation with the unsmoothed $\ell$, $\vs, \vz \in \cK$ and $\vs\circ\vz = \mathbf{0}$ to the tolerance.
+%
+\paragraph{Kernels.}
+%
+\begin{itemize}
+	\item \emph{De~Saxc\'e term:} $\ell_\epsilon$ and $\vL$ against central differences ($10^{-7}$) for $\epsilon \in \{0, 10^{-3}, 0.3\}$, including $\bar{\vs} = \mathbf{0}$, and the bound~\eqref{eq:ec_smoothing_props}; $\vB\vB^{-1} = \vI$ and $(\vE\vL)^2 = \mathbf{0}$ to $10^{-15}$ (Lemma~\ref{lem:ec_nilpotent}).
+	\item \emph{Unsymmetric factorization:} random quasidefinite patterns with unsymmetric (2,1) and (2,2) values against a dense LU with full pivoting ($10^{-12}$), and the supernodal against the simplicial variant on a matrix with wide supernodes ($10^{-10}$ without refinement); a symmetric factorization after an unsymmetric one is unaffected.
+	\item \emph{Reduced Newton system:} \eqref{eq:ec_newton} assembled by \code{KktSystem} against the unreduced system~\eqref{eq:ec_newton_full} in $(\Delta\vx, \Delta\vz, \Delta\vs)$ solved densely, for $\varrho \in \{0, 0.5, 1\}$, with a zero cone, an orthant and Coulomb and non-Coulomb Lorentz cones ($10^{-12}$).
+\end{itemize}
+%
+\paragraph{One contact: sticking, sliding and separation.} A point mass $m$ with velocity $\vx = (v_N, \bar{\vv}_T)$ on a plane, friction coefficient $\mu$, the free velocity $\vv^\mathrm{f}$ (velocity without contact percussion) and no offset: $\mathsf{P} = m\vI$, $\mathsf{q} = -m\vv^\mathrm{f}$, $\mathsf{A} = -\diag(1, \mu, \mu)$, $\mathsf{b} = \mathbf{0}$, one Coulomb cone. The percussion is $\vpi = \diag(1, \mu, \mu)\vz$ and the balance of momentum $m(\vx - \vv^\mathrm{f}) = \vpi$. The exact solution is
+%
+\begin{equation}\label{eq:ec_block}
+	\begin{aligned}
+		&\text{separation } (v^\mathrm{f}_N \geq 0): && \vx = \vv^\mathrm{f} \, , \ \vpi = \mathbf{0} \, ; \\
+		&\text{sticking } (v^\mathrm{f}_N < 0, \ \|\bar{\vv}^\mathrm{f}_T\| \leq -\mu v^\mathrm{f}_N): && \vx = \mathbf{0} \, , \ \vpi = -m\vv^\mathrm{f} \, ; \\
+		&\text{sliding (otherwise)}: && v_N = 0 \, , \ \pi_N = -m v^\mathrm{f}_N \, , \ \bar{\vpi}_T = -\mu\pi_N\frac{\bar{\vv}^\mathrm{f}_T}{\|\bar{\vv}^\mathrm{f}_T\|} \, , \ \bar{\vv}_T = \bar{\vv}^\mathrm{f}_T + \frac{\bar{\vpi}_T}{m} \, .
+	\end{aligned}
+\end{equation}
+%
+(Sliding: with $v_N = 0$, the normal percussion removes the normal free velocity; the friction opposes the sliding direction, which therefore is that of $\bar{\vv}^\mathrm{f}_T$, and it reduces the sliding speed by $\mu\pi_N/m$, which is positive exactly if $\|\bar{\vv}^\mathrm{f}_T\| > -\mu v^\mathrm{f}_N$.) The test uses $m = 2$, $\mu = 0.5$ and $\vv^\mathrm{f} = (-1, 0.3, -0.2)$ (sticking), $(-1, 1.5, 2)$ (sliding) and $(0.7, 1.5, 2)$ (separation), tolerance $10^{-9}$: $\vx$ and $\vpi$ agree with~\eqref{eq:ec_block} to $10^{-8}$, and the classification returns the three states. The solves take 8, 8 and 7 iterations. The sticking case is repeated with $c_{\mathrm{rel}} \in \{0, 0.1, 1\}$, i.e., without smoothing and with strong smoothing.
+%
+\paragraph{Convex relaxation against the exact law.} For the sliding case, the convex program (the same data without the Coulomb flag, $\varrho = 0$) gives the associated law: by Proposition~\ref{prop:convexified_law} with $c = 0$, the sliding contact separates with $v_N = \mu\|\bar{\vv}_T\|$. The test checks this relation to $10^{-7}$ (the relaxed solution has $v_N > 10^{-3}$) and $v_N = 0$ to $10^{-9}$ for the exact mode.
+%
+\paragraph{Hyperstatic box.} A rigid box with mass $m = 1$, inertia $\diag(0.4, 0.4, 0.6)$ and its center $0.5$ above the plane rests on four corner contacts at $(\pm 1, \pm 1, -0.5)$ relative to the center, $\mu = 0.3$, $g = 9.81$, $h = 0.01$, and is pushed sideways with the free velocity $\vv^\mathrm{f} = (1, 0.5, -gh, \mathbf{0})$. $\mathsf{A}$ is $12 \times 6$ of rank 6, so the percussions are not unique (only their resultant is), which makes the Newton matrix singular in the limit. Since the box cannot tip ($v_N = 0$ at four corners forces $\vom = \mathbf{0}$ and $v_z = 0$), it slides with the resultant normal percussion $m g h$ and the friction $\mu m g h$ against the sliding direction:
+%
+\begin{equation}
+	\bar{\vv} = \bar{\vv}^\mathrm{f}\Big(1 - \frac{\mu g h}{\|\bar{\vv}^\mathrm{f}\|}\Big) \, , \qquad v_z = 0 \, , \qquad \vom = \mathbf{0} \, ,
+\end{equation}
+%
+provided $\|\bar{\vv}^\mathrm{f}\| > \mu g h$ and the normal percussions stay nonnegative under the tipping moment of the friction. The solver reproduces the velocity to $10^{-7}$ in 11 iterations and classifies all corners as sliding. This example motivated the pivot rule of Section~\ref{sec:ec_ldu} and the centering bound of Section~\ref{sec:ec_floor}.
+%
+\paragraph{Compliant row and frictionless contact.} A point mass on a floor (Coulomb cone with $\mu = 0.4$), against a frictionless wall (orthant row) and tied by a compliant spring row with $c = 0.05$ (zero cone with compliance), free velocity $(-0.2, 0.8, -1)$: all three cone types and the compliance in one problem. Checked are the exact conditions, $s = 0$ on the zero cone and $v_N = 0$ on the floor (12 iterations).
+%
+\paragraph{Warm start.} The sliding case is solved, then the free velocity is changed to $(-1, 1.4, 2.05)$ (a change of the sliding direction) and solved again with \code{updateData()}: the warm start is used and the solution is exact. It needs 11 iterations against 8 for a cold start at the tight tolerance $10^{-9}$: the recentered previous solution starts close to the boundary with the old sliding direction, the situation of Proposition~\ref{prop:ec_misalignment}. At the moderate tolerances of the time stepping, the warm start pays off clearly (Section~\ref{sec:ec_results}).
+%
+\paragraph{Spinning ball.} The benchmark of Section~\ref{sec:ball_benchmark} with \code{conicxx.exact\_coulomb = on} checks the exact law through the whole engine (\code{tests/test\_convexified\_friction.cpp}, tolerance $10^{-10}$). Table~\ref{tab:ec_ball} compares it with the convexified law: the exact mode keeps $\xi_N = 0$ to $2 \cdot 10^{-8}$ in all active steps, the ball does not sink, the rolling velocity is $10/7\,\mathrm{m/s}$, and the effective restitution of the impacts is $e$, the exact value, where the convexified law gives $e^* = 0.14$ instead of $0.5$.
+%
+\begin{table}[t]
+	\centering
+	\small
+	\caption{Spinning ball benchmark (Section~\ref{sec:ball_benchmark}) with the exact Coulomb mode of ConicXX against the convexified law. Top: sliding ball, $v_{x,0} = 2\,\mathrm{m/s}$. Bottom: impact with $V = 2\,\mathrm{m/s}$, effective restitution $e^* = v_z^+/V$, $h = 10^{-4}\,\mathrm{s}$.}
+	\label{tab:ec_ball}
+	\begin{tabular}{lcccc}
+		\toprule
+		\multicolumn{5}{l}{\emph{persistent sliding}} \\
+		$h$ in s & $v_z(0.1\,\mathrm{s})$ exact & convexified & penetration exact & convexified \\
+		\midrule
+		$10^{-3}$ & $1.2 \cdot 10^{-9}$ & $-3.14 \cdot 10^{-3}$ & $9.6 \cdot 10^{-9}$ & $6.0 \cdot 10^{-4}$ \\
+		$5 \cdot 10^{-4}$ & $3.4 \cdot 10^{-9}$ & $-1.57 \cdot 10^{-3}$ & $9.0 \cdot 10^{-9}$ & $3.0 \cdot 10^{-4}$ \\
+		$2.5 \cdot 10^{-4}$ & $1.9 \cdot 10^{-8}$ & $-7.87 \cdot 10^{-4}$ & $5.9 \cdot 10^{-9}$ & $1.5 \cdot 10^{-4}$ \\
+		\midrule
+		\multicolumn{5}{l}{\emph{impact}} \\
+		$\omega_0$, $e$ & $e^*$ exact & $e^*$ convexified & penetration exact & convexified \\
+		\midrule
+		$50\,\mathrm{s^{-1}}$, $0.5$ (sliding) & $0.5$ & $0.14076$ & --- & --- \\
+		$50\,\mathrm{s^{-1}}$, $0$ (sliding) & $-4.7 \cdot 10^{-11}$ & $-0.23953$ & $1.6 \cdot 10^{-8}$ & $1.5 \cdot 10^{-4}$ \\
+		$10\,\mathrm{s^{-1}}$, $0.5$ (sticking) & $0.5$ & $0.35008$ & --- & --- \\
+		\bottomrule
+	\end{tabular}
+\end{table}
+%
+%-------------------------------------------------------------------------------
+\subsection{Results in CardilloCxx}\label{sec:ec_results}
+%-------------------------------------------------------------------------------
+%
+\paragraph{Integration.} With \code{conicxx.exact\_coulomb = on}, the ConicXX assembler marks every frictional cone as a Coulomb cone (\code{ConeSpec::soc\_coulomb}) and assembles $\mathsf{h} = \vS\vb_c$ without the frozen shift $\bar{\vc}$ of~\eqref{eq:conic_standard_form}; everything else, including the compliant bilateral rows and the recovery~\eqref{eq:conic_recovery}, is unchanged. The warm start after a change of the contact set (\code{conicxx.warm\_start\_after\_setup}) sets the Coulomb slack by~\eqref{eq:ec_phi}, $\vs_i = \vu_i + (\|\bar{\vu}_i\|, \mathbf{0})$, from the current velocities and the matched percussions.
+%
+\paragraph{Accuracy and performance.} Table~\ref{tab:ec_scenes} compares the exact mode with the convexified convex solve on the domino scene (about $1.35 \cdot 10^4$ frictional contacts, no bilateral rows; the contact set changes in every step) and the slinky scene (a rod with 4950 compliant bilateral rows, up to $6.7 \cdot 10^3$ contacts), with the committed configurations \code{scene\_conicxx.config} and the same binary. Besides iterations and time per step it lists the mean normal velocity $|\xi_N|$ of the active contacts (percussion above $10^{-3}$ of the largest), which vanishes for an exact solution. With the termination test $\max_i\|\vs_i\circ\vz_i\| \leq \varepsilon_\mathrm{abs}$, the exact mode was fast, but its active contacts separated with millimeters per second (the column ``$\|\vs\circ\vz\|$''). With~\eqref{eq:ec_termination}, domino at $10^{-5}$ is as accurate as the convexified solve (largest $\xi_N$ $0.03$ against $0.10\,\mathrm{m/s}$) and costs about the same; at $10^{-6}$, the first step of domino and a step after about 30 of slinky fail. In the failing slinky solve, the KKT solves are accurate (refinement residual $10^{-11}$), but the steps to the boundary collapse to $10^{-4}$ at $\tau \approx 2 \cdot 10^{-9}$. The limiting cone is a degenerate stick-slip contact: $\vs_i \approx \mathbf{0}$, $\vz_i$ close to the boundary of the cone, $\bar{\vs}_i$ and $\bar{\vz}_i$ $25^\circ$ apart, and $\Delta\vz_i$ a hundred times larger than $\vz_i$; the Newton model of the De~Saxc\'e term, whose curvature is $1/\|\bar{\vs}_i\|$, is useless there. Neither the smoothing ($c_\mathrm{rel} \in \{0, 1\}$), nor the centering bound ($f \in \{0, 1\}$), nor a pure centering step after a blocked step, nor more refinement steps change this.
+%
+\begin{table}[t]
+	\centering
+	\small
+	\caption{ConicXX per time step: convexified law (homogeneous embedding, symmetric supernodal $\vL\vD\vL\T$) and the exact Coulomb mode (Algorithm~\ref{alg:ec_ipm}, supernodal $\vL\vD\vU$) with the complementarity test $\max_i\|\vs_i\circ\vz_i\| \leq \varepsilon_\mathrm{abs}$ and with~\eqref{eq:ec_termination}; mean over the first 30 (domino, tolerance $10^{-5}$) resp.\ 40 (slinky, $10^{-6}$) steps; $|\xi_N|$ mean normal velocity of the active contacts.}
+	\label{tab:ec_scenes}
+	\begin{tabular}{lccc}
+		\toprule
+		scene & convexified & exact, $\|\vs\circ\vz\|$ & exact, \eqref{eq:ec_termination} \\
+		\midrule
+		domino & 10.0 it, 258 ms & 5.3 it, 183 ms & 7.9 it, 292 ms \\
+		$|\xi_N|$ & $1 \cdot 10^{-5}\,\mathrm{m/s}$ & $3 \cdot 10^{-3}\,\mathrm{m/s}$ & $3 \cdot 10^{-5}\,\mathrm{m/s}$ \\
+		slinky & 11.8 it, 112 ms & 7.9 it, 80 ms & fails after 30 steps \\
+		\bottomrule
+	\end{tabular}
+\end{table}
+%
+%-------------------------------------------------------------------------------
+\subsection{Summary and open questions}\label{sec:ec_summary}
+%-------------------------------------------------------------------------------
+%
+Compared with the IPM of Acary et al.~\cite{Acary2026}, the method differs in the following points: (i) the De~Saxc\'e variable is eliminated, $\vl = \ell_\epsilon(\vs)$, so the Newton system has the size and the sparsity pattern of the convex KKT system; (ii) the complementarity is linearized with NT scaling instead of $\operatorname{Arw}(\vu)$, $\operatorname{Arw}(\vr)$, so the (2,2) blocks are the NT blocks with one modified row (Proposition~\ref{prop:ec_N00}); (iii) the shift is smoothed with $\epsilon = c\tau$, which keeps the Jacobian defined for sticking contacts and preserves the existence and analyticity results (Proposition~\ref{prop:ec_smoothed_path}); (iv) the unsymmetric Newton matrix is factorized by an $\vL\vD\vU$ decomposition on the symbolic structure of the convex problem, with a magnitude-only pivot rule, instead of a general sparse LU with pivoting; (v) the centering target is bounded below by the complementarity tolerance, which turns the end game into Newton steps onto a central point and is necessary with the NT direction (Proposition~\ref{prop:ec_misalignment}); (vi) the complementarity is measured per cone as a velocity or impulse error relative to the scales of the problem, since the product $\|\vs_i\circ\vz_i\|$ lets active contacts separate; (vii) warm starts are used.
+
+Open questions: the end game. At degenerate stick-slip contacts the interior-point iteration stalls before the per-cone complementarity test~\eqref{eq:ec_termination} is met (slinky and domino at $10^{-6}$). Candidates are a semismooth Newton polishing on the natural map $\vz - \Pi_\cK(\vz - \rho\vs(\vx))$, with $\vs(\vx)$ explicit by~\eqref{eq:ec_phi}, or an active-set Newton step on the contact states of the classification, both started from the last interior iterate; and continuation (Section~\ref{sec:ec_continuation}) if the stall is a turning point. The warm start on equality-dominated scenes (slinky) loses the merit comparison against the cold start for the same reason as in the convex solver. Finally, the existence theory assumes the Slater condition, which ConicXX does not check; it fails, e.g., for a contact whose normal velocity cannot be made positive by any velocity because of perfect constraints.

@@ -43,6 +43,8 @@ bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, con
   cone_spec_ = cone_spec;
   settings_ = settings;
   cones_ = std::make_unique<ConeSet>(cone_spec_);
+  coulomb_.reset();
+  if (cone_spec_.hasCoulomb()) coulomb_ = std::make_unique<CoulombIpm>(cone_spec_, n_, m_);
 
   P_ = P;
   q_ = q;
@@ -628,6 +630,7 @@ const Solution& SolverImpl::solve() {
     return solution_;
   }
   kkt_.updateSettings(settings_);  // runtime settings may have changed through setSettings()
+  if (coulomb_) return solveCoulomb();
   const int verbose = settings_.verbose;
   if (verbose >= 1) {
     std::printf("conicxx: n = %d, m = %d (%d zero, %d nonneg, %d soc blocks), nnz(L) = %d\n",
@@ -833,6 +836,112 @@ const Solution& SolverImpl::solve() {
     std::printf("conicxx: %s after %d iterations, %d factorizations, %d dynamic pivots, %.3f ms\n",
                 toString(final_status), iterations, kkt_.stats().factorizations,
                 kkt_.stats().dynamic_reg_pivots, 1e3 * solution_.info.solve_time_s);
+  }
+  return solution_;
+}
+
+CoulombProblem SolverImpl::coulombProblem() {
+  return CoulombProblem{P_,      q_,      A_,        b_,        compliance_, has_compliance_, cone_spec_.zero_dim,
+                        *cones_, kkt_,    d_eff_,    e_eff_,    dinv_eff_,   einv_eff_,       cinv_,
+                        normb_,  normq_};
+}
+
+const Solution& SolverImpl::solveCoulomb() {
+  const CoulombProblem pb = coulombProblem();
+  const int verbose = settings_.verbose;
+  if (verbose >= 1) {
+    std::printf("conicxx (Coulomb): n = %d, m = %d (%d zero, %d nonneg, %d soc blocks, %d Coulomb)\n",
+                static_cast<int>(n_), static_cast<int>(m_), static_cast<int>(cone_spec_.zero_dim),
+                static_cast<int>(cone_spec_.nonneg_dim), static_cast<int>(cone_spec_.soc_dims.size()),
+                static_cast<int>(coulomb_->map().numCones()));
+  }
+
+  // Starting point as in solve(): the recentered warm start if its merit is not above the last
+  // cold start's, otherwise the better of the two.
+  const bool use_warm = settings_.warm_start && have_warm_start_;
+  Scalar warm_merit = std::numeric_limits<Scalar>::infinity();
+  bool started = false;
+  if (use_warm) {
+    warm_x_trial_ = warm_x_;
+    warm_s_trial_ = warm_s_;
+    warm_z_trial_ = warm_z_;
+    cones_->zeroPrimalZeroConeBlocks(warm_s_trial_);
+    cones_->projectOntoCones(warm_s_trial_);
+    cones_->projectOntoCones(warm_z_trial_);
+    recenterWarmStart(warm_x_trial_, warm_s_trial_, warm_z_trial_);
+    warm_merit = coulomb_->metrics(pb, settings_, warm_x_trial_, warm_s_trial_, warm_z_trial_).merit;
+    started = have_cold_merit_ && warm_merit <= cold_merit_;
+  }
+  if (!started) {
+    if (!computeInitialPoint()) {
+      solution_.status = Status::NumericalError;
+      solution_.x = x_;
+      solution_.s = s_;
+      solution_.z = z_;
+      return solution_;
+    }
+    cold_merit_ = coulomb_->metrics(pb, settings_, x_, s_, z_).merit;
+    have_cold_merit_ = true;
+    started = use_warm && warm_merit <= cold_merit_;
+  }
+  if (started) {
+    x_ = warm_x_trial_;
+    s_ = warm_s_trial_;
+    z_ = warm_z_trial_;
+  }
+  tau_ = kappa_ = 1.0;
+
+  CoulombIpm::Result r = coulomb_->solve(pb, settings_, x_, s_, z_, solve_start_);
+  // A failed warm-started solve is repeated once from the cold start.
+  int iterations = r.iterations;
+  if (started && r.status != Status::Solved && r.status != Status::MaxTime && computeInitialPoint()) {
+    started = false;
+    if (verbose >= 1) std::printf("conicxx (Coulomb): %s from the warm start, restarting cold\n", toString(r.status));
+    r = coulomb_->solve(pb, settings_, x_, s_, z_, solve_start_);
+    iterations += r.iterations;
+  }
+
+  solution_.status = r.status;
+  sol_x_scratch_ = x_;
+  sol_s_scratch_ = s_;
+  sol_z_scratch_ = z_;
+  if (equilibrated_) equil_.unscaleSolution(sol_x_scratch_, sol_s_scratch_, sol_z_scratch_);
+  solution_.x = sol_x_scratch_;
+  solution_.s = sol_s_scratch_;
+  solution_.z = sol_z_scratch_;
+  Pmul(x_, Px_);
+  solution_.objective = cinv_ * (q_.dot(x_) + 0.5 * x_.dot(Px_));
+  solution_.contact_states = classifyContacts(coulomb_->map(), s_, z_, std::sqrt(std::max(r.mu, Scalar(0))));
+
+  Info& info = solution_.info;
+  info.iterations = iterations;
+  info.primal_residual = r.metrics.res_primal;
+  info.dual_residual = r.metrics.res_dual;
+  info.duality_gap = r.metrics.comp_abs;
+  info.mu = r.mu;
+  info.merit = r.metrics.merit;
+  info.coulomb_smoothing = r.smoothing;
+  info.warm_start_used = started;
+  info.warm_start_merit = use_warm ? warm_merit : Scalar(0);
+  info.cold_start_merit = have_cold_merit_ ? cold_merit_ : Scalar(0);
+  info.kkt_refinement_residual = kkt_.lastRefinementResidual();
+  info.equality_rank_deficient = kkt_.equalityRankDeficient();
+  info.kkt_factorizations = kkt_.stats().factorizations;
+  info.kkt_dynamic_reg_pivots = kkt_.stats().dynamic_reg_pivots;
+  info.kkt_refinement_steps = kkt_.stats().refinement_steps;
+  info.setup_time_s = setup_time_s_;
+  info.solve_time_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start_).count();
+
+  if (r.status == Status::Solved && settings_.warm_start) {
+    warm_x_ = x_;
+    warm_s_ = s_;
+    warm_z_ = z_;
+    have_warm_start_ = true;
+  }
+  if (verbose >= 1) {
+    std::printf("conicxx (Coulomb): %s after %d iterations, %d factorizations, %d dynamic pivots, %.3f ms\n",
+                toString(r.status), iterations, kkt_.stats().factorizations,
+                kkt_.stats().dynamic_reg_pivots, 1e3 * info.solve_time_s);
   }
   return solution_;
 }

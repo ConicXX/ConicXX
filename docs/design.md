@@ -710,3 +710,163 @@ step (40 steps), iterations unchanged.
 With the factorization 2.6x faster on domino, the triangular solves (7.4 ms per pass against 17.4 ms
 per factorization) become the next cost to watch; a supernodal solve (dense blocks with BLAS-2/3)
 would follow the same structure.
+
+## Exact Coulomb friction (experimental)
+
+`ConeSpec::soc_coulomb` marks second-order cones as Coulomb cones. The problem is then the
+discrete Coulomb friction problem of Acary, Armand, Nguyen (CMAME 461, 2026) in the unit-cone
+scaling (rows `(n, mu t1, mu t2)`, done by the caller):
+
+    Px + q + A'z = 0,   Ax + s - b - C z_E - E l(s) = 0,   s o z = 0,   s, z in K,
+
+with `l_i(s) = ||s_i,bar||` the De Saxce term and `E` putting it into the first row of cone `i`. `s`
+is the modified relative velocity, `u = s - E l(s) = b - Ax` the relative velocity (the tangential
+parts of `s` and `u` agree). This is not the KKT system of an optimization problem (non-associated
+friction), so `solve()` runs `CoulombIpm` instead of the homogeneous embedding; every other part of
+the solver (cones, NT scaling, KKT pattern and ordering, equilibration, refinement, warm start) is
+shared. Without Coulomb cones nothing changes.
+
+### Newton matrix
+
+With `B^-1 = I - theta E L`, `L_i = [0, s_i,bar' / l_i]`, the linearized primal equation is
+`A dx + B^-1 ds = -r_p`, and the NT elimination `ds = -(Hs dz + ds_const)` gives
+
+    [ P   A'          ] [dx]   [ -r_d                      ]
+    [ A   -B^-1 Hs    ] [dz] = [ -r_p + B^-1 ds_const      ].
+
+Since `L_i e_0 = 0`, `(E L)^2 = 0` and `B = I + theta E L`. Of the two equivalent reductions,
+`[P A'; B A -Hs]` (with the (2,1) block row-mixed) and the one above, this one changes neither `A` nor
+`A'`: only row 0 of every Coulomb block, `N_i = Hs_i - theta e_0 (Hs_i L_i')'`. The KKT pattern,
+ordering and symbolic analysis are those of the convex problem (no padding of A to the union of a
+cone's row patterns). `N_i(0,0) = eta^2 (2 w_0^2 - 1 - 2 theta w_0 w_bar' l_bar) >=
+eta^2 (w_0 - sqrt(w_0^2 - 1))^2 > 0` (`|l_bar| < 1`, `w'Jw = 1`), so a cone pivot eliminated first
+keeps its sign.
+
+For a sliding contact near the solution, with Jordan frame `c_1,2 = (1, +-d)/2`, `Hs ~ alpha c_1 c_1'`
+(alpha ~ 1/mu) and `N ~ alpha/2 (0, d) c_1'`: the large NT stiffness moves from the normal row into
+the tangential direction. The symmetric matrix of the convex problem therefore differs from the
+Coulomb one at the leading order on every sliding contact, so GMRES preconditioned with the
+symmetric factorization (the guide's path A) would need about one iteration per sliding contact.
+The Newton matrix is factorized directly instead.
+
+### Unsymmetric LDU on the quasidefinite structure
+
+`QuasiDefiniteLdlt::factorizeUnsymmetric()` computes `K = L D U` on the analyzed (symmetric) pattern
+and ordering: simplicial (up-looking, row k of L and column k of U from two triangular solves over
+the same reach) and supernodal (`sn_xu_` holds the U^T blocks in the layout of the L blocks, every
+update done twice with the roles swapped). `U` is stored as `U^T` in the pattern of L; solves and
+refinement use both value arrays. `KktSystem::updateScalingAndFactorize(cones, coulomb_blocks, row0)`
+writes the modified rows: the lower triangle keeps `-Hs(a,0)`, the diagonal and the transposed
+entries `(0,a)` get `-row0_a`.
+
+Pivot rule: the matrix is not quasidefinite. Eliminating a body column after its cones gives the
+pivot `P + A' Hs^-1 B A`, and `Hs^-1 B ~ (2/sigma_2) c_2 e_0'` for a sliding contact is not definite,
+so a pivot of the unexpected sign is legitimate. Forcing the quasidefinite sign (replacing it by
+`+delta`) destroyed the factor in the hyperstatic box test (refinement residual 4e31). The LDU only
+replaces pivots with `|d| < dynamic_eps`, keeping their sign. No dynamically regularized pivot
+occurred on domino and slinky.
+
+### Smoothing
+
+`l_i = sqrt(||s_i,bar||^2 + (c mu_k)^2)` with `mu_k` the complementarity measure of the iteration
+(frozen within it) and `c = CoulombSettings::smoothing / z_ref`, `z_ref` the median normal component
+of z at the start. The error `c mu_k` has the order of the complementarity, `L` stays well defined at
+`s_bar = 0` (sticking), and the Jacobian is smooth. The termination test uses the unsmoothed term.
+`smoothing = 0` is the paper's unsmoothed variant (L = 0 at `s_bar = 0`); the sticking test passes
+with 0, 0.1 and 1.
+
+### The loop
+
+Infeasible-start Mehrotra predictor-corrector without the embedding (no infeasibility certificates:
+existence follows from the Slater condition, which is not checked): residuals `r_d`, `r_p` with the
+smoothed term, `mu = s'z / nu`, affine direction, `sigma = (mu_aff/mu)^3`, corrector with the
+second-order term, step to the boundary times `max_step_fraction`, backtracking with the centrality
+safeguard of the convex loop. Start: as the convex loop (recentered warm start if its merit is not
+above the cold start's); a warm-started solve that fails is repeated from the cold start.
+Termination: `res_primal` (unsmoothed term), `res_dual` below `tol_feas` and, for every cone, the
+complementarity in velocity units (user units)
+
+    v_i = ||s_i o z_i|| / (||z_i|| + m_i ||s_i||)  <=  tol_gap_abs + tol_gap_rel ||s_i||,
+
+with `m_i = 1 / max_rows (A P^-1 A')_rr` the effective mass of the contact (diagonal of P). For an
+active contact `v_i` is its velocity error, for a separating one the velocity its residual impulse
+induces. The measure is local: an earlier version normalized with global scales
+(`V = max(||x||, ||s||, ||q|| / max P_ii)`, `Z = max(||q||, ||z||)`) and let every contact keep an
+error of `tol V`, which on domino added up to 20-40x the energy injection of the convexified solve
+(exact_coulomb_findings.md).
+
+**Why not `||s o z||`.** The first version tested `max_i ||s_i o z_i|| <= tol_gap_abs` (velocity x
+impulse). On domino (impulses 1e-4 to 1e-2 N s) that accepted normal velocities of `tol / z_i`:
+active contacts separated with 3 mm/s on average and up to 8 cm/s, and the dominos bounced. On
+interior points every active Coulomb contact separates (`s_i in int L <=> u_i0 > 0`), so the error
+always injects energy; the convex solver has the same weakness but overshoots mu by about 100x in its
+last iteration. The floors `max(1, .)` of the residual normalizations are not usable either: with
+`Z = 1`, every contact with `z_i < tol` counts as separated whatever its velocity. `||b||` is not used
+in V: the position-level bias of stiff bilateral rows (slinky: 250) is no contact velocity.
+
+**Complementarity floor.** In the NT neighborhood (`lambda_min(lambda o lambda) >= theta mu`) a pair
+near the boundary can keep its tangential parts misaligned: with misalignment phi,
+`s'z ~ ab phi^2` but `||s o z|| ~ ab phi`, i.e. `||s o z|| ~ sqrt(mu)`. The NT direction does not
+target `s o z` itself (the paper's Arw(u)/Arw(r) linearization does), and Mehrotra's sigma ~ 0 drives
+mu far below what the tolerance needs: on the hyperstatic box mu reached 1e-17 with
+`||s o z|| = 5e-8`, the KKT solves lost all accuracy and the run ended AlmostSolved; from a warm start
+(previous sliding direction) the complementarity fell only 5x per iteration. The centering target is
+therefore bounded below, `max(sigma mu, CoulombSettings::mu_floor * tol_comp)`, and without the
+second-order term once the bound is active: the steps then converge to the central point at that mu,
+where `||s o z|| = mu < tol`. With the local measure the bound is
+`mu_floor * min_i tol_i (||z_i|| + m_i ||s_i||)` (scaled units). The box solves to 1e-9 in 11
+iterations.
+
+**Blocked steps.** After two steps with `alpha < 0.1` the loop restores the last iterate with
+centrality `>= 0.1 mu` and runs a pseudo-arclength continuation of the central path (`continuePath`:
+bordered corrector from two solves with one factorization, local relative metric), at most 5 times;
+otherwise `InsufficientProgress`. This fallback does not get through the domino failures (the last
+well-centred iterate is often the start), see exact_coulomb_findings.md.
+
+**Path monitor** (`verbose >= 3`): the tangent `J dy/dmu = -dF/dmu` with the factorization of the
+iteration gives per-cone orders `mu ||ds_i/dmu|| / ||s_i||` (0: stays, 1: vanishes like mu, 1/2:
+not strictly complementary, >> 1: sharp turn of the path) and the number of pivots of unexpected sign.
+
+**Contact states** (`Solution::contact_states`) come from the spectral values of `s_i`, `z_i` in
+equilibrated units with threshold `sqrt(mu)` (the vanishing ones are O(mu), the others O(1)).
+
+### Measurements
+
+CardilloCxx, committed `scene_conicxx.config` (domino 1e-5, slinky 1e-6), same binary, convexified law
+(frozen shift, embedding, supernodal LDL^T) against `conicxx.exact_coulomb = on` (supernodal LDU),
+mean per step; `xi_N` is the normal velocity of contacts with a percussion above 1e-3 of the largest:
+
+The last column used the intermediate global measure (V, Z above), which was still too loose. With the
+local measure the exact solver fails in step 1 of domino already at 1e-5; the cause (a late sharp
+turn of the central path driven by degenerate contacts) and the cost of following it are analysed in
+exact_coulomb_findings.md.
+
+| Scene | convexified | exact, `||s o z||` test | exact, global per-cone measure |
+|---|---|---|---|
+| domino, 30 steps | 10.0 it, 258 ms, mean xi_N 1e-5 m/s | 5.3 it, 183 ms, mean xi_N 3e-3 m/s | 7.9 it, 292 ms, mean xi_N 3e-5 m/s |
+| slinky, 40 steps | 11.8 it, 112 ms | 7.9 it, 80 ms | fails after about 30 steps (AlmostSolved) |
+
+The fast first results were at a much lower accuracy. With the per-cone measure:
+
+- domino at 1e-5 is accurate (largest xi_N 0.03 m/s against 0.10 convexified) and costs about as
+  much as the convexified solve; at 1e-6 the first step fails.
+- slinky at 1e-6 stalls in some step with the steps to the boundary collapsing (1e-4) at mu about
+  2e-9 (scaled) while the KKT solves are accurate (refinement residual 1e-11). The limiting cone is a
+  degenerate stick-slip contact (`s ~ 0`, `z` near the cone boundary, `s_bar` and `z_bar` 25 degrees
+  apart, `dz` 100x larger than `z`): the Newton model of the De Saxce term (curvature `1/||s_bar||`)
+  is useless there. Neither smoothing 0 or 1, nor the floor 0 or 1, nor a pure centering step after
+  a blocked step, nor 30 refinement steps helps. The open measure is an end game that does not rely
+  on the central path there (active-set or semismooth Newton polishing, see below).
+
+The simplicial LDU alone made domino much slower (459 ms per step, `||s o z||` test). The spinning-ball
+benchmark (`test_convexified_friction`, exact-ConicXX variant): `xi_N = 0` to 2e-8 in every active
+step, no penetration, effective restitution e.
+
+### Not implemented (relative to the implementation guide)
+
+- P_mu scaling inside ConicXX: the caller passes unit-cone data (CardilloCxx does already).
+- Slater check, theta homotopy, ANM. Pseudo-arclength continuation exists only as the fallback
+  above; a working one would cost hundreds of factorizations per step (exact_coulomb_findings.md).
+- Semismooth Newton (or active-set) polishing.
+- GMRES with the symmetric factorization as preconditioner (see "Newton matrix").
+- FCLIB harness.
