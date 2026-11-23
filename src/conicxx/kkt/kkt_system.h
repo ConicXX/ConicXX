@@ -86,9 +86,11 @@ class KktSystem {
   SparseMat K_;
   QuasiDefiniteLdlt ldlt_;
 
-  // Static regularization: reg_ = reg_base_ + static_proportional * max|diag(K)|, per row.
+  // Static regularization: reg_ = reg_base_ + static_proportional * max|diag(K)|, per row, plus
+  // static_soc_proportional * max|diag(H_k)| on the rows of every SOC block k.
   Vec reg_base_, reg_;
   Scalar reg_proportional_ = 0;
+  Scalar reg_soc_proportional_ = 0;
   std::vector<unsigned char> row_kind_;  // per row: 0 P, 1 orthant, 2 SOC, 3 zero cone
   std::vector<Index> diag_slots_;       // K slot of the diagonal entry of every row
   std::vector<Index> zero_row_pivots_;  // pivot positions of the zero-cone rows

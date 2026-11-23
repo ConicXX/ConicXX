@@ -105,6 +105,9 @@ bool SolverImpl::setup(const SparseMat& P, const Vec& q, const SparseMat& A, con
   lambda_trial_.resize(m_);
   rx_inf_.resize(n_);
   rz_inf_.resize(m_);
+  comp_s_.resize(m_);
+  comp_z_.resize(m_);
+  comp_w_.resize(m_);
   s_aff_scratch_.resize(m_);
   z_aff_scratch_.resize(m_);
   warm_x_trial_.resize(n_);
@@ -514,7 +517,22 @@ SolverImpl::Metrics SolverImpl::computeMetrics() const {
   m.dot_bz = cinv_ * dot_bz_;
   m.dot_qx = cinv_ * dot_qx_;
 
-  m.merit = std::max({m.res_primal, m.res_dual, std::min(m.gap_abs, m.gap_rel)});
+  // Complementarity of the unscaled (s, z) / tau: the natural map z - proj_K(z - s) vanishes
+  // exactly at complementary pairs, also where the gap is small but a pair is not yet decided.
+  const Index nz = cone_spec_.zero_dim;
+  if (m_ > nz) {
+    comp_s_ = s_ * tinv;
+    comp_z_ = z_ * (cinv_ * tinv);
+    if (equilibrated_) {
+      comp_s_.array() *= einv_eff_.array();
+      comp_z_.array() *= e_eff_.array();
+    }
+    comp_w_ = comp_z_ - comp_s_;
+    cones_->projectOntoCones(comp_w_);
+    m.res_comp = (comp_z_ - comp_w_).tail(m_ - nz).lpNorm<Eigen::Infinity>();
+  }
+
+  m.merit = std::max({m.res_primal, m.res_dual, std::min(m.gap_abs, m.gap_rel), m.res_comp});
   return m;
 }
 
@@ -713,14 +731,16 @@ const Solution& SolverImpl::solve() {
       }
     }
     // Progress check (Clarabel): a residual grew, and either the iterate is already accurate
-    // (kappa/tau ~ 0 with a converged gap) or a residual exploded by 100x above the tolerance.
+    // (kappa/tau ~ 0 with a converged gap) or a residual exploded by 100x above the tolerance and
+    // above sqrt(eps) (below that, a growing residual is roundoff of an accurate iterate).
     if (iter >= 2 && (m.res_dual > prev.res_dual || m.res_primal > prev.res_primal)) {
       const bool stalled = m.ktratio < 100 * eps &&
                            (prev.gap_abs < settings_.tol_gap_abs || prev.gap_rel < settings_.tol_gap_rel);
+      const Scalar diverged_res = std::max(100 * settings_.tol_feas, std::sqrt(eps));
       const bool diverging =
           m.ktratio < 1.0 &&
-          ((m.res_dual > 100 * settings_.tol_feas && m.res_dual > 100 * prev.res_dual) ||
-           (m.res_primal > 100 * settings_.tol_feas && m.res_primal > 100 * prev.res_primal));
+          ((m.res_dual > diverged_res && m.res_dual > 100 * prev.res_dual) ||
+           (m.res_primal > diverged_res && m.res_primal > 100 * prev.res_primal));
       if (stalled || diverging) {
         final_status = Status::InsufficientProgress;
         break;
@@ -786,12 +806,12 @@ const Solution& SolverImpl::solve() {
     maybeRescale();
   }
 
-  // MaxIterations/MaxTime/InsufficientProgress report the best iterate, upgraded to an Almost*
-  // status if it meets the reduced tolerances.
+  // MaxIterations/MaxTime/InsufficientProgress/NumericalError report the best iterate, upgraded
+  // to an Almost* status if it meets the reduced tolerances.
   Metrics final_metrics;
   Scalar final_mu;
   if ((final_status == Status::MaxIterations || final_status == Status::MaxTime ||
-       final_status == Status::InsufficientProgress) &&
+       final_status == Status::InsufficientProgress || final_status == Status::NumericalError) &&
       have_best_) {
     restoreBestIterate();
     final_metrics = best_metrics_;

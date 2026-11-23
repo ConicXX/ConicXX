@@ -17,6 +17,10 @@ struct RegularizationSettings {
   /// Added on every row, multiplied by max|diag(K)|, so the regularization keeps its relative
   /// size on badly scaled problems.
   Scalar static_proportional = 2.2e-16 * 2.2e-16;
+  /// Added on the rows of every second-order-cone block, multiplied by the largest diagonal
+  /// entry of that block of the scaling matrix H: eliminating the block loses digits relative to
+  /// that entry once its eigenvalues spread near the cone boundary.
+  Scalar static_soc_proportional = 1e-12;
 
   /// Dynamic regularization during the factorization: a pivot with D*sign < dynamic_eps is
   /// replaced by sign*dynamic_delta (sign = +1 for P rows, -1 for cone rows).

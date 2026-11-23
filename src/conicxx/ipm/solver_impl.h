@@ -112,7 +112,8 @@ class SolverImpl {
     Scalar ktratio = 0;                       // kappa/tau (scale-invariant, no unscaling needed)
     Scalar res_primal_inf = 0, res_dual_inf = 0;  // unscaled, NOT tau-normalized, T4.2
     Scalar dot_bz = 0, dot_qx = 0;            // unscaled, for the infeasibility certificate value
-    Scalar merit = 0;                         // max(res_primal, res_dual, |gap_abs|), T4.3
+    Scalar res_comp = 0;  // unscaled, tau-normalized natural map ||z - proj_K(z - s)||_inf over the non-zero cones
+    Scalar merit = 0;     // max(res_primal, res_dual, min(gap_abs, gap_rel), res_comp), T4.3
   };
   /// Computes every unscaled metric from the current iterate (x_, s_, z_, tau_, kappa_) and the
   /// residual cache (computeResiduals() must have been called first this iteration).
@@ -236,6 +237,8 @@ class SolverImpl {
   // computeMetrics()'s infeasibility-residual intermediates (size n_, m_) -- mutable for the same
   // reason (computeMetrics() is const).
   mutable Vec rx_inf_, rz_inf_;
+  // computeMetrics()'s unscaled s, z and natural-map argument (size m_), mutable for the same reason.
+  mutable Vec comp_s_, comp_z_, comp_w_;
 
   // solve()'s affine-only trial point, used just to compute mu_aff for the Mehrotra centering
   // parameter sigma (size m_ each).

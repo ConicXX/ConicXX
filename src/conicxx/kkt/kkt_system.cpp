@@ -116,6 +116,7 @@ void KktSystem::updateSettings(const Settings& settings) {
   const Scalar base[4] = {reg.static_P, reg.static_nonneg, reg.static_soc, reg.static_zero};
   for (Index i = 0; i < static_cast<Index>(row_kind_.size()); ++i) reg_base_[i] = base[row_kind_[i]];
   reg_proportional_ = reg.static_proportional;
+  reg_soc_proportional_ = reg.static_soc_proportional;
   ldlt_.params.dynamic_enable = reg.dynamic_enable;
   ldlt_.params.dynamic_eps = reg.dynamic_eps;
   ldlt_.params.dynamic_delta = reg.dynamic_delta;
@@ -166,6 +167,19 @@ bool KktSystem::updateScalingAndFactorize(const ConeSet& cones) {
   Scalar max_diag = 0;
   for (Index slot : diag_slots_) max_diag = std::max(max_diag, std::abs(sparsity_.getValue(K_, slot)));
   reg_.array() = reg_base_.array() + reg_proportional_ * max_diag;
+  // Within a dense SOC block of H the eigenvalues spread as the iterate approaches the cone
+  // boundary; eliminating the block cancels digits relative to its largest entry. A
+  // regularization relative to that entry keeps the pivots of the block well-defined.
+  if (reg_soc_proportional_ > 0) {
+    for (Index bi = 0; bi < cones.numBlocks(); ++bi) {
+      if (cones.blockType(bi) != ConeType::SecondOrder) continue;
+      const Index off = n_ + cones.blockOffset(bi);
+      const Index dim = cones.blockDim(bi);
+      Scalar block_max = 0;
+      for (Index a = 0; a < dim; ++a) block_max = std::max(block_max, std::abs(sparsity_.getValue(K_, diag_slots_[off + a])));
+      reg_.segment(off, dim).array() += reg_soc_proportional_ * block_max;
+    }
+  }
   ldlt_.setStaticRegularization(reg_);
 
   factorized_ = ldlt_.factorize(K_);

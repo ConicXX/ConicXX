@@ -88,9 +88,14 @@ regardless of whether the `cinv` scaling is right or wrong.
 ### Best iterate and "almost" statuses (T4.3)
 
 `SolverImpl::updateBestIterate()` snapshots `(x_, s_, z_, tau_, kappa_)` plus that iterate's
-`Metrics` and `mu` whenever `merit = max(res_primal, res_dual, |gap_abs|)` improves. On
-`MaxIterations`/`MaxTime`/`InsufficientProgress`, the best snapshot (not the last iterate) is
-restored before finalizing, and upgraded to `AlmostSolved`/`AlmostPrimalInfeasible`/
+`Metrics` and `mu` whenever `merit = max(res_primal, res_dual, min(gap_abs, gap_rel), res_comp)`
+improves. `res_comp = ||z - proj_K(z - s)||_inf` is the natural map of the unscaled, tau-normalized
+(s, z) over the non-zero cones: it vanishes exactly at complementary pairs. The gap alone does not
+measure that; on problems with pairs that are not strictly complementary (s and z both tend to zero,
+e.g. contacts touching without force) it falls like the gap's square root, and without it the merit
+picked iterates whose gap was smaller but whose pairs were far from complementary. On
+`MaxIterations`/`MaxTime`/`InsufficientProgress`/`NumericalError`, the best snapshot (not the last
+iterate) is restored before finalizing, and upgraded to `AlmostSolved`/`AlmostPrimalInfeasible`/
 `AlmostDualInfeasible` if it meets `Settings::reduced_tol_*`.
 
 ## KKT factorization (Phase 9)
@@ -117,8 +122,15 @@ The interior-point extensions are those of Clarabel's and QOCO's modified QDLDL:
    (1e-13) is replaced by `sign*dynamic_delta` (2e-7), Clarabel's rule. The inertia is therefore always
    (n, m); `Info::kkt_dynamic_reg_pivots` counts the replacements.
 2. **Static regularization on the pivots only.** Row i starts from `K_ii + sign_i*reg_i` with
-   `reg_i = static_<block> + static_proportional*max|diag(K)|`. It is never written into the matrix copy
-   used for refinement. With it on every row the factorized matrix is quasidefinite, so every symmetric
+   `reg_i = static_<block> + static_proportional*max|diag(K)|`, plus
+   `static_soc_proportional*max|diag(H_k)|` (1e-12) on the rows of every SOC block k. It is never
+   written into the matrix copy used for refinement. Near the cone boundary the eigenvalues of a dense
+   SOC block of H spread like 1/mu^2; eliminating the block then loses digits relative to its largest
+   entry, the remaining pivots of the block are roundoff, and from mu around 1e-15 on they collapse
+   (hundreds of dynamic pivots in one factorization, NaN refinement, `NumericalError`). The
+   block-relative term keeps them defined. On the frictional contact problems of ffclib (domino,
+   slinky) it moved the reachable accuracy from 1e-4...1e-8 to about 1e-8...4e-9 (natural-map contact
+   error); factors from 1e-15 to 1e-12 behave alike, larger ones perturb the Newton directions. With it on every row the factorized matrix is quasidefinite, so every symmetric
    ordering factorizes with the expected signs (Vanderbei 1995); dynamic regularization is only a
    backstop for roundoff and exact cancellation.
 3. **Iterative refinement against the exact K** in the infinity norm with Clarabel's tolerances (abs
@@ -405,7 +417,9 @@ theta = 1e-4 it only rejects steps that leave some pair badly uncentred.
   scaled by the affine step length, because the starting point, cold or warm, may be badly centred.
 - **Progress check:** from the third iteration on, if a residual grows, the solve stops with
   `InsufficientProgress` when the iterate is already accurate (kappa/tau < 100 eps with a converged gap)
-  or when a residual grows by 100x above 100 tol_feas. The best iterate is reported, upgraded to
+  or when a residual grows by 100x above max(100 tol_feas, sqrt(eps)): below sqrt(eps) a growing residual
+  is roundoff of an accurate iterate (with tol_feas = 1e-14 a residual going from 1e-16 to 1e-12 ended
+  the solve early). The best iterate is reported, upgraded to
   `AlmostSolved` if it meets the reduced tolerances.
 
 ### Fewer factorizations
