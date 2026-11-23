@@ -8,8 +8,8 @@ namespace conicxx {
 using Scalar = double;
 using Index = int;
 
-using Vec = Eigen::VectorXd;
-using Mat = Eigen::MatrixXd;
+using Vec = Eigen::Matrix<Scalar, Eigen::Dynamic, 1>;
+using Mat = Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic>;
 
 /// Sparse matrices use `int` as the storage index type (rather than
 /// Eigen's default `Eigen::Index`/`ptrdiff_t`) to keep CSC index arrays
