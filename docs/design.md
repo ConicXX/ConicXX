@@ -417,9 +417,12 @@ theta = 1e-4 it only rejects steps that leave some pair badly uncentred.
   scaled by the affine step length, because the starting point, cold or warm, may be badly centred.
 - **Progress check:** from the third iteration on, if a residual grows, the solve stops with
   `InsufficientProgress` when the iterate is already accurate (kappa/tau < 100 eps with a converged gap)
-  or when a residual grows by 100x above max(100 tol_feas, sqrt(eps)): below sqrt(eps) a growing residual
+  and its merit is not the best so far, or when a residual grows by 100x above max(100 tol_feas, sqrt(eps)): below sqrt(eps) a growing residual
   is roundoff of an accurate iterate (with tol_feas = 1e-14 a residual going from 1e-16 to 1e-12 ended
-  the solve early). The best iterate is reported, upgraded to
+  the solve early). The merit condition matters where the relative gap is measured against an
+  objective far larger than the complementarity terms: on ffclib's net_wires (heavy bodies with
+  v'Mv ~ 1e5, contact percussions ~ 1e-6) the gap converged at contact errors of 1e-5...1e-4 while the
+  merit, through `res_comp`, still fell by 10x per iteration. The best iterate is reported, upgraded to
   `AlmostSolved` if it meets the reduced tolerances.
 
 ### Fewer factorizations

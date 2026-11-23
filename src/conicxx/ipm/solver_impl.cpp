@@ -731,10 +731,12 @@ const Solution& SolverImpl::solve() {
       }
     }
     // Progress check (Clarabel): a residual grew, and either the iterate is already accurate
-    // (kappa/tau ~ 0 with a converged gap) or a residual exploded by 100x above the tolerance and
-    // above sqrt(eps) (below that, a growing residual is roundoff of an accurate iterate).
+    // (kappa/tau ~ 0 with a converged gap) and no better than the best one, or a residual exploded
+    // by 100x above the tolerance and above sqrt(eps) (below that, a growing residual is roundoff
+    // of an accurate iterate). A converged gap alone does not end the solve while the merit, which
+    // includes the complementarity of the pairs, still improves.
     if (iter >= 2 && (m.res_dual > prev.res_dual || m.res_primal > prev.res_primal)) {
-      const bool stalled = m.ktratio < 100 * eps &&
+      const bool stalled = m.ktratio < 100 * eps && m.merit > best_merit_ &&
                            (prev.gap_abs < settings_.tol_gap_abs || prev.gap_rel < settings_.tol_gap_rel);
       const Scalar diverged_res = std::max(100 * settings_.tol_feas, std::sqrt(eps));
       const bool diverging =
