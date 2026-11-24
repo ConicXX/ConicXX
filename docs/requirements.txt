@@ -1,0 +1,6 @@
+# Python packages for building the documentation (Doxygen must be installed separately).
+sphinx==9.1.1
+sphinx-rtd-theme==3.1.0
+breathe==5.1.0
+exhale==0.3.7
+sphinxcontrib-bibtex==2.7.0

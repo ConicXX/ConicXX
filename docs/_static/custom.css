@@ -1,0 +1,4 @@
+/* Wider content area for formulas and tables. */
+.wy-nav-content { max-width: 960px; }
+/* Keep long formulas scrollable instead of overflowing on narrow screens. */
+div.math { overflow-x: auto; }

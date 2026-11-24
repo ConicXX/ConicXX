@@ -9,3 +9,8 @@ compile_commands.json
 bench_baseline.txt
 bench_after.txt
 build-*/
+
+# Sphinx documentation (generated)
+docs/_build/
+docs/_doxygen/
+docs/api/

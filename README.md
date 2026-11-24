@@ -1,5 +1,7 @@
 # ConicXX
 
+[![Documentation](https://readthedocs.org/projects/conicxx/badge/?version=latest)](https://conicxx.readthedocs.io/)
+
 **ConicXX** is a modern C++ solver for quadratic conic optimization problems.
 
 It implements a primal-dual interior-point method with:
@@ -15,6 +17,8 @@ and factorization symbolic analysis across timesteps).
 
 Supported convex sets: the zero cone (equality constraints), the nonnegative orthant, and
 second-order (Lorentz) cones -- no exponential/power/semidefinite cones.
+
+Full documentation (user guide, algorithm description, API reference): https://conicxx.readthedocs.io/
 
 ## Problem formulation
 
